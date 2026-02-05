@@ -1,0 +1,31 @@
+# .gitignore for C# / .NET Core projects
+
+# Build results
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio files
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+*.cache
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*~
+
+# Python (if any)
+__pycache__/
+*.py[cod]
+
+# Sensitive config
+API_config/
+config.json

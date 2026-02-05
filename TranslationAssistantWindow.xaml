@@ -1,0 +1,102 @@
+<Window x:Class="DocumentTranslator.TranslationAssistantWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="翻译助手" Height="600" Width="1000"
+        WindowStartupLocation="CenterScreen"
+        Icon="logo.ico">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部工具栏 -->
+        <Border Grid.Row="0" Background="#F8F9FA" BorderBrush="#E9ECEF" BorderThickness="0,0,0,1" Padding="10">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="AI引擎：" VerticalAlignment="Center" Margin="0,0,5,0" FontWeight="Bold"/>
+                <ComboBox x:Name="EngineComboBox" Width="150" VerticalAlignment="Center" Margin="0,0,20,0">
+                    <ComboBoxItem Content="RWKV" Tag="rwkv" IsSelected="True"/>
+                </ComboBox>
+                <TextBlock Text="翻译方向：" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold"/>
+                <ComboBox x:Name="DirectionComboBox" Width="150" VerticalAlignment="Center" Margin="0,0,20,0">
+                    <ComboBoxItem Content="中文 → 英文" Tag="zh-en" IsSelected="True"/>
+                    <ComboBoxItem Content="中文 → 日文" Tag="zh-ja"/>
+                    <ComboBoxItem Content="英文 → 中文" Tag="en-zh"/>
+                    <ComboBoxItem Content="日文 → 中文" Tag="ja-zh"/>
+                </ComboBox>
+                <CheckBox x:Name="UseTerminologyCheckBox" Content="使用术语表" IsChecked="True" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                <Button x:Name="ClearButton" Content="清空" Click="Clear_Click" Width="80" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <Button x:Name="CopyButton" Content="复制译文" Click="Copy_Click" Width="100" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 翻译区域 -->
+        <Grid Grid.Row="1" Margin="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 原文区域 -->
+            <Border Grid.Column="0" BorderBrush="#DEE2E6" BorderThickness="1" CornerRadius="5" Padding="10" Background="White">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    
+                    <TextBlock Grid.Row="0" Text="原文" FontWeight="Bold" Margin="0,0,0,5" Foreground="#2C3E50"/>
+                    <TextBox x:Name="SourceTextBox" Grid.Row="1" 
+                             TextWrapping="Wrap" 
+                             AcceptsReturn="True" 
+                             VerticalScrollBarVisibility="Auto"
+                             FontSize="14"
+                             Padding="5"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             KeyDown="SourceTextBox_KeyDown"/>
+                </Grid>
+            </Border>
+
+            <!-- 翻译按钮 -->
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0">
+                <Button x:Name="TranslateButton" Content="翻译 ➔" Click="Translate_Click" 
+                         Width="60" Height="60" FontSize="18" FontWeight="Bold"
+                         Background="#007BFF" Foreground="White"
+                         BorderThickness="0" Cursor="Hand"/>
+            </StackPanel>
+
+            <!-- 译文区域 -->
+            <Border Grid.Column="2" BorderBrush="#DEE2E6" BorderThickness="1" CornerRadius="5" Padding="10" Background="#F8F9FA">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    
+                    <TextBlock Grid.Row="0" Text="译文" FontWeight="Bold" Margin="0,0,0,5" Foreground="#007BFF"/>
+                    <TextBox x:Name="TargetTextBox" Grid.Row="1" 
+                             TextWrapping="Wrap" 
+                             AcceptsReturn="True" 
+                             VerticalScrollBarVisibility="Auto"
+                             FontSize="14"
+                             Padding="5"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             IsReadOnly="True"/>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- 底部状态栏 -->
+        <Border Grid.Row="2" Background="#F8F9FA" BorderBrush="#E9ECEF" BorderThickness="0,1,0,0" Padding="10">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock x:Name="StatusText" Text="就绪" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                <ProgressBar x:Name="TranslationProgress" Width="200" Height="20" Visibility="Collapsed" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

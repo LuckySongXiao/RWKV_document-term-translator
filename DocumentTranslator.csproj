@@ -1,0 +1,101 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>logo.ico</ApplicationIcon>
+    <AssemblyName>RWKV_术语文档翻译助手</AssemblyName>
+    <AssemblyDescription>支持Word、PDF、Excel、PowerPoint、TXT等多种格式的智能文档翻译工具</AssemblyDescription>
+    <Copyright>糖醋鹦鹉 © 2026</Copyright>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+
+    <!-- 单文件发布配置 -->
+    <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract Condition="'$(RuntimeIdentifier)' != ''">true</IncludeNativeLibrariesForSelfExtract>
+    <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
+
+    <!-- 警告抑制 -->
+    <NoWarn>$(NoWarn);NU1701;NU1702;NU1603;CS8625</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Nullable>disable</Nullable>
+
+    <!-- 优化设置 -->
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.0.1" />
+    <PackageReference Include="iText7" Version="8.0.2" />
+    <PackageReference Include="EPPlus" Version="7.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="Tesseract" Version="5.2.0" />
+    <!-- PPT处理相关包 -->
+    <PackageReference Include="ClosedXML" Version="0.104.0" />
+  </ItemGroup>
+
+  <!-- 单文件发布时需要包含的文件 -->
+  <ItemGroup>
+    <EmbeddedResource Include="API_config\**\*" />
+    <EmbeddedResource Include="data\**\*" />
+    <EmbeddedResource Include="config.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="logo.ico" />
+  </ItemGroup>
+
+
+
+  <!-- 复制API配置文件到输出目录 -->
+  <ItemGroup>
+    <None Include="API_config\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- 复制数据文件到输出目录 -->
+  <ItemGroup>
+    <None Include="data\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- 复制OCR数据文件到输出目录 -->
+  <ItemGroup>
+    <None Include="tessdata\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- 复制配置文件到输出目录 -->
+  <ItemGroup>
+    <None Include="config.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- 单文件发布时保留的程序集 -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="DocumentFormat.OpenXml" />
+    <TrimmerRootAssembly Include="iText7" />
+    <TrimmerRootAssembly Include="EPPlus" />
+    <TrimmerRootAssembly Include="ClosedXML" />
+    <TrimmerRootAssembly Include="Newtonsoft.Json" />
+  </ItemGroup>
+
+  <!-- Test exclusions removed -->
+
+</Project>
