@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Services.Translation
 {
@@ -19,6 +20,8 @@ namespace DocumentTranslator.Services.Translation
         protected readonly ILogger _logger;
         protected string _translationLogPath;
         protected string _translationLogPath2;
+        protected string _preprocessedLogPath;
+        protected string _preprocessedLogPath2;
         protected string _duplicateLogPath;
         protected string _abnormalLogPath;
         protected string _failureLogPath;
@@ -36,12 +39,14 @@ namespace DocumentTranslator.Services.Translation
 
         private void UpdateLogPaths()
         {
-            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            // 将日志路径改到根目录下的 logs 文件夹，方便用户查看
+            var baseDir = PathHelper.GetSafeBaseDirectory();
             var logsDir = Path.Combine(baseDir, "logs");
             
             _translationLogPath = Path.Combine(logsDir, "Success", $"translation_log_{_batchTimestamp}.jsonl");
             _translationLogPath2 = Path.Combine(logsDir, "Success_Bilingual", $"translation_log_{_batchTimestamp}.jsonl");
+            
+            _preprocessedLogPath = Path.Combine(logsDir, "Preprocessed", $"preprocessed_log_{_batchTimestamp}.jsonl");
+            _preprocessedLogPath2 = Path.Combine(logsDir, "Preprocessed_Bilingual", $"preprocessed_log_{_batchTimestamp}.jsonl");
             
             _duplicateLogPath = Path.Combine(logsDir, "Duplicate", $"duplicate_log_{_batchTimestamp}.txt");
             _abnormalLogPath = Path.Combine(logsDir, "Abnormal", $"abnormal_log_{_batchTimestamp}.txt");
@@ -412,6 +417,20 @@ namespace DocumentTranslator.Services.Translation
                     _logger.LogInformation($"创建日志目录: {logDirectory2}");
                 }
 
+                var preprocessedDirectory = Path.GetDirectoryName(_preprocessedLogPath);
+                if (!string.IsNullOrEmpty(preprocessedDirectory) && !Directory.Exists(preprocessedDirectory))
+                {
+                    Directory.CreateDirectory(preprocessedDirectory);
+                    _logger.LogInformation($"创建日志目录: {preprocessedDirectory}");
+                }
+
+                var preprocessedDirectory2 = Path.GetDirectoryName(_preprocessedLogPath2);
+                if (!string.IsNullOrEmpty(preprocessedDirectory2) && !Directory.Exists(preprocessedDirectory2))
+                {
+                    Directory.CreateDirectory(preprocessedDirectory2);
+                    _logger.LogInformation($"创建日志目录: {preprocessedDirectory2}");
+                }
+
                 var duplicateDirectory = Path.GetDirectoryName(_duplicateLogPath);
                 if (!string.IsNullOrEmpty(duplicateDirectory) && !Directory.Exists(duplicateDirectory))
                 {
@@ -487,6 +506,53 @@ namespace DocumentTranslator.Services.Translation
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, $"记录翻译日志失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 记录预处理后的文本与译文的对照日志到JSON文件
+        /// </summary>
+        /// <param name="preprocessedText">预处理后的文本（术语替换后）</param>
+        /// <param name="translatedText">译文</param>
+        /// <param name="sourceLang">源语言代码</param>
+        /// <param name="targetLang">目标语言代码</param>
+        public void LogPreprocessedTranslation(string preprocessedText, string translatedText, string sourceLang, string targetLang)
+        {
+            if (string.IsNullOrWhiteSpace(preprocessedText) || string.IsNullOrWhiteSpace(translatedText))
+                return;
+
+            if (preprocessedText == translatedText)
+                return;
+
+            try
+            {
+                var sourceLangName = GetLanguageName(sourceLang);
+                var targetLangName = GetLanguageName(targetLang);
+
+                var logEntry1 = new
+                {
+                    text = $"{sourceLangName}: {preprocessedText}\n\n{targetLangName}: {translatedText}"
+                };
+
+                var logEntry2 = new
+                {
+                    text = $"{targetLangName}: {translatedText}\n\n{sourceLangName}: {preprocessedText}"
+                };
+
+                var jsonLine1 = JsonConvert.SerializeObject(logEntry1, Formatting.None);
+                var jsonLine2 = JsonConvert.SerializeObject(logEntry2, Formatting.None);
+
+                lock (_globalLogLock)
+                {
+                    File.AppendAllText(_preprocessedLogPath, jsonLine1 + Environment.NewLine);
+                    File.AppendAllText(_preprocessedLogPath2, jsonLine2 + Environment.NewLine);
+                }
+
+                _logger.LogDebug($"预处理翻译日志已记录: {preprocessedText.Substring(0, Math.Min(50, preprocessedText.Length))}...");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"记录预处理翻译日志失败: {ex.Message}");
             }
         }
 

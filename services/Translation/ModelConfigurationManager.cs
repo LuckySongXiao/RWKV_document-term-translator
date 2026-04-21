@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using DocumentTranslator.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace DocumentTranslator.Services.Translation
@@ -20,7 +21,7 @@ namespace DocumentTranslator.Services.Translation
         public ModelConfigurationManager(ILogger<ModelConfigurationManager> logger)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-            _configFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "models_config.jsonl");
+            _configFilePath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "models_config.jsonl");
             _modelConfigs = new Dictionary<string, List<ModelConfig>>();
             
             LoadConfiguration();

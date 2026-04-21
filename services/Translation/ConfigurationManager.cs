@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Services.Translation
 {
@@ -34,7 +35,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
                 if (File.Exists(configPath))
                 {
                     var configJson = File.ReadAllText(configPath);
@@ -59,7 +60,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var apiConfigDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config");
+                var apiConfigDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config");
                 if (!Directory.Exists(apiConfigDir))
                 {
                     _logger.LogWarning($"API配置目录不存在: {apiConfigDir}");
@@ -83,7 +84,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", fileName);
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config", fileName);
                 if (File.Exists(configPath))
                 {
                     var configJson = File.ReadAllText(configPath);
@@ -156,7 +157,7 @@ namespace DocumentTranslator.Services.Translation
                 {
                     try
                     {
-                        var rwkvConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", "rwkv_api.json");
+                        var rwkvConfigPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config", "rwkv_api.json");
                         if (File.Exists(rwkvConfigPath))
                         {
                             var rwkvJson = File.ReadAllText(rwkvConfigPath);
@@ -253,7 +254,7 @@ namespace DocumentTranslator.Services.Translation
             {
                 _config[key] = value;
                 
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
                 var options = new JsonSerializerOptions
                 {
                     WriteIndented = true,
@@ -283,7 +284,7 @@ namespace DocumentTranslator.Services.Translation
 
                 var fileName = $"{serviceName}_api.json";
 
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", fileName);
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config", fileName);
                 var directory = Path.GetDirectoryName(configPath);
 
                 if (!Directory.Exists(directory))

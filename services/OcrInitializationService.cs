@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Extensions.Logging;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Services
 {
@@ -23,7 +24,7 @@ namespace DocumentTranslator.Services
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _httpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromMinutes(5)
+                Timeout = TimeSpan.FromSeconds(30)
             };
         }
 
@@ -82,7 +83,7 @@ namespace DocumentTranslator.Services
 
         private string GetTessdataPath()
         {
-            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var baseDir = PathHelper.GetSafeBaseDirectory();
             var tessdataPath = Path.Combine(baseDir, TESSDATA_DIR);
             
             if (!Directory.Exists(tessdataPath))
@@ -178,59 +179,86 @@ namespace DocumentTranslator.Services
 
         private async Task<bool> PromptUserManualDownloadAsync(string tessdataPath)
         {
-            return await Application.Current.Dispatcher.InvokeAsync(() =>
+            try
             {
-                var message = $"OCR功能需要中文语言数据文件，但自动下载失败。\n\n" +
-                             $"请按以下步骤手动下载：\n" +
-                             $"1. 点击下方按钮打开下载页面\n" +
-                             $"2. 下载文件: {CHI_SIM_FILE}\n" +
-                             $"3. 将文件保存到以下目录:\n" +
-                             $"   {tessdataPath}\n\n" +
-                             $"注意: OCR功能将无法使用，直到文件下载完成。";
-
-                var result = MessageBox.Show(
-                    message,
-                    "OCR初始化失败",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning,
-                    MessageBoxResult.Yes,
-                    MessageBoxOptions.DefaultDesktopOnly);
-
-                if (result == MessageBoxResult.Yes)
+                // 使用 BeginInvoke 避免在后台线程中阻塞等待 Dispatcher
+                // 如果 Dispatcher 不可用（如应用正在关闭），直接返回 false
+                if (Application.Current == null || Application.Current.Dispatcher == null)
                 {
-                    try
-                    {
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = DOWNLOAD_PAGE_URL,
-                            UseShellExecute = true
-                        });
-
-                        MessageBox.Show(
-                            $"请将下载的 {CHI_SIM_FILE} 文件保存到:\n\n{tessdataPath}\n\n" +
-                            $"保存后，请重新启动应用程序以启用OCR功能。",
-                            "下载说明",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Information,
-                            MessageBoxResult.OK,
-                            MessageBoxOptions.DefaultDesktopOnly);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "无法打开下载页面");
-                        MessageBox.Show(
-                            $"无法自动打开下载页面，请手动访问:\n{DOWNLOAD_PAGE_URL}\n\n" +
-                            $"请将 {CHI_SIM_FILE} 保存到:\n{tessdataPath}",
-                            "无法打开浏览器",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Error,
-                            MessageBoxResult.OK,
-                            MessageBoxOptions.DefaultDesktopOnly);
-                    }
+                    _logger.LogWarning("无法显示OCR下载提示（Application不可用）");
+                    return false;
                 }
 
-                return false;
-            });
+                if (Application.Current.Dispatcher.CheckAccess())
+                {
+                    ShowManualDownloadDialog(tessdataPath);
+                }
+                else
+                {
+                    await Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        ShowManualDownloadDialog(tessdataPath);
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "显示OCR下载提示失败");
+            }
+
+            return false;
+        }
+
+        private void ShowManualDownloadDialog(string tessdataPath)
+        {
+            var message = $"OCR功能需要中文语言数据文件，但自动下载失败。\n\n" +
+                         $"请按以下步骤手动下载：\n" +
+                         $"1. 点击下方按钮打开下载页面\n" +
+                         $"2. 下载文件: {CHI_SIM_FILE}\n" +
+                         $"3. 将文件保存到以下目录:\n" +
+                         $"   {tessdataPath}\n\n" +
+                         $"注意: OCR功能将无法使用，直到文件下载完成。";
+
+            var result = MessageBox.Show(
+                message,
+                "OCR初始化失败",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.Yes,
+                MessageBoxOptions.DefaultDesktopOnly);
+
+            if (result == MessageBoxResult.Yes)
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = DOWNLOAD_PAGE_URL,
+                        UseShellExecute = true
+                    });
+
+                    MessageBox.Show(
+                        $"请将下载的 {CHI_SIM_FILE} 文件保存到:\n\n{tessdataPath}\n\n" +
+                        $"保存后，请重新启动应用程序以启用OCR功能。",
+                        "下载说明",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information,
+                        MessageBoxResult.OK,
+                        MessageBoxOptions.DefaultDesktopOnly);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "无法打开下载页面");
+                    MessageBox.Show(
+                        $"无法自动打开下载页面，请手动访问:\n{DOWNLOAD_PAGE_URL}\n\n" +
+                        $"请将 {CHI_SIM_FILE} 保存到:\n{tessdataPath}",
+                        "无法打开浏览器",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error,
+                        MessageBoxResult.OK,
+                        MessageBoxOptions.DefaultDesktopOnly);
+                }
+            }
         }
 
         public bool IsOcrReady()

@@ -13,6 +13,7 @@ using DocumentFormat.OpenXml.Drawing;
 using DocumentFormat.OpenXml.Drawing.Charts;
 using DocumentFormat.OpenXml.Spreadsheet;
 using DocumentFormat.OpenXml;
+using DocumentTranslator.Helpers;
 using Shape = DocumentFormat.OpenXml.Presentation.Shape;
 using GraphicFrame = DocumentFormat.OpenXml.Presentation.GraphicFrame;
 using GroupShape = DocumentFormat.OpenXml.Presentation.GroupShape;
@@ -165,7 +166,7 @@ namespace DocumentTranslator.Services.Translation
                 var timeStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
                 // 生成纯翻译版本的文件名
-                var baseDir = string.IsNullOrEmpty(outputDir) ? AppDomain.CurrentDomain.BaseDirectory : outputDir;
+                var baseDir = string.IsNullOrEmpty(outputDir) ? PathHelper.GetSafeBaseDirectory() : outputDir;
                 var translationOnlyPath = Path.Combine(baseDir!, $"{fileName}_纯翻译版_{timeStamp}{ext}");
 
                 // 复制双语文件到新位置
@@ -231,7 +232,7 @@ namespace DocumentTranslator.Services.Translation
             try
             {
                 // 生成输出文件路径
-                string outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+                string outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
                 if (!Directory.Exists(outputDir))
                 {
                     Directory.CreateDirectory(outputDir);
@@ -1393,7 +1394,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+                var outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
                 var fileName = Path.GetFileNameWithoutExtension(filePath);
                 var timeStamp = DateTime.Now.ToString("yyyyMMddHHmmss");
                 var excelPath = Path.Combine(outputDir, $"{fileName}_翻译结果_{timeStamp}.xlsx");
@@ -1617,7 +1618,7 @@ namespace DocumentTranslator.Services.Translation
             }
 
             // 在程序根目录下创建输出目录和日志目录
-            var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+            var outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);

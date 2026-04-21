@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using DocumentTranslator.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace DocumentTranslator.Services.Translation
@@ -49,7 +50,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var baseDir = PathHelper.GetSafeBaseDirectory();
                 var possiblePythonPaths = new[]
                 {
                     Path.Combine(baseDir, "pdf2zh", "build", "runtime", "python.exe"),
@@ -144,7 +145,7 @@ namespace DocumentTranslator.Services.Translation
                 throw new FileNotFoundException("文件不存在");
             }
 
-            var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+            var outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
@@ -388,7 +389,7 @@ namespace DocumentTranslator.Services.Translation
                 else if (translatorType.Contains("rwkv"))
                 {
                     var translatorConfig = _configManager.GetTranslatorConfig("rwkv");
-                    config["OPENAI_BASE_URL"] = translatorConfig?.ApiUrl ?? "http://locahost:8000/v1/chat/completions";
+                    config["OPENAI_BASE_URL"] = translatorConfig?.ApiUrl ?? "http://localhost:8000/v1/chat/completions";
                     config["OPENAI_API_KEY"] = "";
                     config["OPENAI_MODEL"] = translatorConfig?.Model ?? "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118";
                     _logger.LogInformation($"使用RWKV配置: BaseURL={config["OPENAI_BASE_URL"]}, Model={config["OPENAI_MODEL"]}");
@@ -461,7 +462,7 @@ namespace DocumentTranslator.Services.Translation
                     CreateNoWindow = true,
                     StandardOutputEncoding = Encoding.UTF8,
                     StandardErrorEncoding = Encoding.UTF8,
-                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory
+                    WorkingDirectory = PathHelper.GetSafeBaseDirectory()
                 };
 
                 _logger.LogInformation("执行PDF翻译命令: {Path} {Arguments}", _pythonRuntimePath, arguments);

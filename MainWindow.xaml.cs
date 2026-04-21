@@ -2,9 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using Microsoft.Extensions.Logging;
@@ -12,6 +16,8 @@ using Microsoft.Extensions.DependencyInjection;
 using DocumentTranslator.Services.Translation;
 using DocumentTranslator.Services.Logging;
 using DocumentTranslator.Services;
+using DocumentTranslator.Services.RwkvLocal;
+using DocumentTranslator.Services.RwkvLocal.Models;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Presentation;
@@ -23,74 +29,1072 @@ using IOPath = System.IO.Path;
 using IOFile = System.IO.File;
 using IODirectory = System.IO.Directory;
 using IOFileInfo = System.IO.FileInfo;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator
 {
     public partial class MainWindow : Window
     {
-        private readonly Dictionary<string, string> _languageMap;
-        private readonly TranslationService _translationService;
-        private readonly DocumentProcessorFactory _documentProcessorFactory;
-        private readonly TermExtractor _termExtractor;
-        private readonly ConfigurationManager _configurationManager;
-        private readonly ILogger<MainWindow> _logger;
-        private readonly ILoggerFactory _loggerFactory;
+        private Dictionary<string, string> _languageMap;
+        private TranslationService _translationService;
+        private DocumentProcessorFactory _documentProcessorFactory;
+        private TermExtractor _termExtractor;
+        private ConfigurationManager _configurationManager;
+        private ILogger<MainWindow> _logger;
+        private ILoggerFactory _loggerFactory;
         private TranslationOutputConfig _outputConfig = new TranslationOutputConfig();
         private string _currentEngine = "rwkv";
         private bool _isTranslating = false;
         private readonly Queue<string> _logMessages = new Queue<string>(40);
-        private readonly string _historyRecordPath;
+        private string _historyRecordPath;
         private readonly object _logLock = new object();
         private DispatcherTimer _uiUpdateTimer;
         private volatile bool _logsChanged = false;
+
+        // 本地模型服务
+        private GpuResourceService? _gpuResourceService;
+        private ModelManagementService? _modelManagementService;
+        private ConcurrencyCalculator? _concurrencyCalculator;
+        private ModelBenchmarkCache? _benchmarkCache;
+        private RwkvProcessService? _rwkvProcessService;
+        private LlamaCppProcessService? _llamaCppProcessService;
+        private ModelConverter? _modelConverter;
+        private ModelDownloadService? _modelDownloadService;
+
+        // 当前使用的推理工具名称
+        private string _currentToolName = "rwkv_lightning";
+
+        // GGUF模型默认下载地址
+        private const string DefaultGgufModelScopeUrl = "https://www.modelscope.cn/models/shoumenchougou/RWKV7-G1e-1.5B-GGUF/files";
+        // SafeTensors模型默认下载地址
+        private const string DefaultStModelScopeUrl = "https://www.modelscope.cn/models/AlicLi/rwkv7-g1-libtorch-st/files";
+
+        // 本地模型数据
+        private List<GpuInfo> _availableGpus = new List<GpuInfo>();
+        private List<ModelInfo> _availableModels = new List<ModelInfo>();
+
+        // 下载相关
+        private CancellationTokenSource? _downloadCts;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // 初始化UI更新定时器，避免高频日志回调阻塞UI线程
-            _uiUpdateTimer = new DispatcherTimer
+            // 安全加载窗口图标（避免XAML中Icon属性加载失败导致窗口无法显示）
+            try
             {
-                Interval = TimeSpan.FromMilliseconds(100) // 每100ms刷新一次UI
-            };
+                var iconPath = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "logo.ico");
+                if (IOFile.Exists(iconPath))
+                {
+                    using var stream = IOFile.OpenRead(iconPath);
+                    this.Icon = BitmapFrame.Create(stream);
+                }
+            }
+            catch { }
+
+            // 设置窗口标题
+            this.Title = "RWKV文档术语翻译助手 v3.1";
+
+            // 初始化UI更新定时器
+            _uiUpdateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             _uiUpdateTimer.Tick += (s, e) => UpdateLogUI();
             _uiUpdateTimer.Start();
 
-            _historyRecordPath = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "History_record");
-            if (!IODirectory.Exists(_historyRecordPath))
+            // 绑定事件处理器（轻量级，不阻塞UI）
+            ChineseToForeign.Checked += OnTranslationDirectionChanged;
+            ForeignToChinese.Checked += OnTranslationDirectionChanged;
+            LanguageCombo.SelectionChanged += OnLanguageSelectionChanged;
+            BilingualOutput.Checked += OnOutputFormatChanged;
+            TranslationOnlyOutput.Checked += OnOutputFormatChanged;
+
+            // 初始化并发建议与滑块
+            try
             {
-                IODirectory.CreateDirectory(_historyRecordPath);
+                SuggestedParallelText.Text = "4";
+                ParallelismSlider.Value = 4;
+                ParallelismValueText.Text = $"并发: 4";
+                ParallelismInput.Text = "4";
             }
+            catch { }
 
-            // 初始化依赖注入容器
-            var services = new ServiceCollection();
-            ConfigureServices(services);
-            var serviceProvider = services.BuildServiceProvider();
-
-            // 获取服务实例
-            _translationService = serviceProvider.GetRequiredService<TranslationService>();
-            _documentProcessorFactory = serviceProvider.GetRequiredService<DocumentProcessorFactory>();
-            _termExtractor = serviceProvider.GetRequiredService<TermExtractor>();
-            _configurationManager = serviceProvider.GetRequiredService<ConfigurationManager>();
-            _logger = serviceProvider.GetRequiredService<ILogger<MainWindow>>();
-            _loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
-
-            // 初始化基础语言映射
-            _languageMap = new Dictionary<string, string>
+            ParallelismSlider.ValueChanged += (s, e) =>
             {
-                {"英语", "en"}, {"日语", "ja"}, {"韩语", "ko"}, {"法语", "fr"},
-                {"德语", "de"}, {"西班牙语", "es"}, {"越南语", "vi"}, {"意大利语", "it"},
-                {"俄语", "ru"}, {"葡萄牙语", "pt"}, {"荷兰语", "nl"}, {"阿拉伯语", "ar"},
-                {"泰语", "th"}, {"印尼语", "id"}, {"马来语", "ms"}, {"土耳其语", "tr"},
-                {"波兰语", "pl"}, {"捷克语", "cs"}, {"匈牙利语", "hu"}, {"希腊语", "el"},
-                {"瑞典语", "sv"}, {"挪威语", "no"}, {"丹麦语", "da"}, {"芬兰语", "fi"}
+                int value = (int)Math.Round(ParallelismSlider.Value);
+                ParallelismValueText.Text = $"并发: {value}";
+                ParallelismInput.Text = value.ToString();
             };
 
-            // 动态更新语言映射和UI
-            UpdateLanguageMappingFromTerminology();
+            ParallelismInput.TextChanged += (s, e) =>
+            {
+                if (int.TryParse(ParallelismInput.Text, out int value))
+                {
+                    value = Math.Max((int)ParallelismSlider.Minimum, Math.Min((int)ParallelismSlider.Maximum, value));
+                    ParallelismSlider.Value = value;
+                    ParallelismValueText.Text = $"并发: {value}";
+                }
+            };
 
-            InitializeUI();
-            LogMessage("🟢 系统初始化完成");
+            // 窗口已准备好显示，在窗口 Loaded 后进行重型初始化
+            this.Loaded += async (s, e) =>
+            {
+                await InitializeHeavyServicesAsync();
+            };
+        }
+
+        /// <summary>
+        /// 异步初始化重型服务（DI容器、翻译服务、GPU服务等）
+        /// 在后台线程执行，不阻塞窗口显示
+        /// </summary>
+        private async Task InitializeHeavyServicesAsync()
+        {
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    _historyRecordPath = IOPath.Combine(PathHelper.GetSafeBaseDirectory(), "History_record");
+                    if (!IODirectory.Exists(_historyRecordPath))
+                    {
+                        IODirectory.CreateDirectory(_historyRecordPath);
+                    }
+
+                    // 初始化依赖注入容器（这是最耗时的操作）
+                    var services = new ServiceCollection();
+                    ConfigureServices(services);
+                    var serviceProvider = services.BuildServiceProvider();
+
+                    // 获取服务实例
+                    _translationService = serviceProvider.GetRequiredService<TranslationService>();
+                    _documentProcessorFactory = serviceProvider.GetRequiredService<DocumentProcessorFactory>();
+                    _termExtractor = serviceProvider.GetRequiredService<TermExtractor>();
+                    _configurationManager = serviceProvider.GetRequiredService<ConfigurationManager>();
+                    _logger = serviceProvider.GetRequiredService<ILogger<MainWindow>>();
+                    _loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+                    // 初始化语言映射
+                    _languageMap = new Dictionary<string, string>
+                    {
+                        {"英语", "en"}, {"日语", "ja"}, {"韩语", "ko"}, {"法语", "fr"},
+                        {"德语", "de"}, {"西班牙语", "es"}, {"越南语", "vi"}, {"意大利语", "it"},
+                        {"俄语", "ru"}, {"葡萄牙语", "pt"}, {"荷兰语", "nl"}, {"阿拉伯语", "ar"},
+                        {"泰语", "th"}, {"印尼语", "id"}, {"马来语", "ms"}, {"土耳其语", "tr"},
+                        {"波兰语", "pl"}, {"捷克语", "cs"}, {"匈牙利语", "hu"}, {"希腊语", "el"},
+                        {"瑞典语", "sv"}, {"挪威语", "no"}, {"丹麦语", "da"}, {"芬兰语", "fi"}
+                    };
+                });
+
+                // 在UI线程更新UI相关部分
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    UpdateLanguageMappingFromTerminology();
+                    UpdateSuggestedParallelism();
+                    LogMessage("🟢 系统初始化完成");
+                });
+
+                // 异步初始化本地模型服务
+                await InitializeLocalModelServicesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "系统初始化失败");
+                await Dispatcher.InvokeAsync(() => LogMessage($"⚠️ 系统初始化失败: {ex.Message}"));
+            }
+        }
+
+        /// <summary>
+        /// 异步初始化本地模型服务
+        /// </summary>
+        private async Task InitializeLocalModelServicesAsync()
+        {
+            try
+            {
+                // 在后台线程初始化GPU服务（NVML加载可能较慢）
+                await Task.Run(() =>
+                {
+                    _gpuResourceService = new GpuResourceService(_logger);
+                    _modelManagementService = new ModelManagementService(_logger);
+                    _benchmarkCache = new ModelBenchmarkCache(_logger);
+                    _concurrencyCalculator = new ConcurrencyCalculator(_logger, _gpuResourceService, _modelManagementService, _benchmarkCache);
+                    _rwkvProcessService = new RwkvProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
+                    _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService);
+                    _modelConverter = new ModelConverter(_logger);
+                    _modelDownloadService = new ModelDownloadService(_logger);
+                });
+
+                // 订阅服务状态变化事件
+                _rwkvProcessService.StatusChanged += OnRwkvServiceStatusChanged;
+                _rwkvProcessService.BenchmarkOutputReceived += OnBenchmarkOutputReceived;
+                _llamaCppProcessService.StatusChanged += OnLlamaCppServiceStatusChanged;
+                _modelConverter.ProgressChanged += OnModelConversionProgress;
+                _modelDownloadService.StatusChanged += OnDownloadStatusChanged;
+                _modelDownloadService.ProgressChanged += OnDownloadProgressChanged;
+                _modelDownloadService.DownloadCompleted += OnDownloadCompleted;
+
+                LogMessage("🎮 本地模型服务初始化完成");
+
+                // 异步初始化GPU和模型列表
+                await InitializeGpuAndModelsAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化本地模型服务失败");
+                LogMessage($"⚠️ 本地模型服务初始化失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 初始化本地模型服务（保留同步版本用于兼容）
+        /// </summary>
+        private void InitializeLocalModelServices()
+        {
+            try
+            {
+                // 创建服务实例
+                _gpuResourceService = new GpuResourceService(_logger);
+                _modelManagementService = new ModelManagementService(_logger);
+                _benchmarkCache = new ModelBenchmarkCache(_logger);
+                _concurrencyCalculator = new ConcurrencyCalculator(_logger, _gpuResourceService, _modelManagementService, _benchmarkCache);
+                _rwkvProcessService = new RwkvProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
+                _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService);
+                _modelConverter = new ModelConverter(_logger);
+                _modelDownloadService = new ModelDownloadService(_logger);
+
+                // 订阅服务状态变化事件
+                _rwkvProcessService.StatusChanged += OnRwkvServiceStatusChanged;
+                _rwkvProcessService.BenchmarkOutputReceived += OnBenchmarkOutputReceived;
+                _llamaCppProcessService.StatusChanged += OnLlamaCppServiceStatusChanged;
+                _modelConverter.ProgressChanged += OnModelConversionProgress;
+                _modelDownloadService.StatusChanged += OnDownloadStatusChanged;
+                _modelDownloadService.ProgressChanged += OnDownloadProgressChanged;
+                _modelDownloadService.DownloadCompleted += OnDownloadCompleted;
+
+                // 异步初始化GPU和模型列表
+                _ = InitializeGpuAndModelsAsync();
+
+                LogMessage("🎮 本地模型服务初始化完成");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化本地模型服务失败");
+                LogMessage($"⚠️ 本地模型服务初始化失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 异步初始化GPU和模型列表
+        /// </summary>
+        private async Task InitializeGpuAndModelsAsync()
+        {
+            try
+            {
+                // 检测GPU
+                _availableGpus = await _gpuResourceService!.GetAllGpusAsync();
+                
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    GpuSelectorCombo.Items.Clear();
+                    if (_availableGpus.Count > 0)
+                    {
+                        foreach (var gpu in _availableGpus)
+                        {
+                            GpuSelectorCombo.Items.Add(new ComboBoxItem 
+                            { 
+                                Content = gpu.DisplayName, 
+                                Tag = gpu 
+                            });
+                        }
+                        GpuSelectorCombo.SelectedIndex = 0;
+                        LogMessage($"🎮 检测到 {_availableGpus.Count} 个NVIDIA GPU");
+                        
+                        // 显示GPU显存信息
+                        var firstGpu = _availableGpus[0];
+                        GpuMemoryText.Text = $"显存: {firstGpu.UsedMemoryGB:F2}/{firstGpu.TotalMemoryGB:F1}GB";
+                    }
+                    else
+                    {
+                        GpuSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未检测到NVIDIA GPU" });
+                        GpuSelectorCombo.SelectedIndex = 0;
+                        LogMessage("⚠️ 未检测到NVIDIA GPU，本地推理功能不可用");
+                    }
+                });
+
+                // 扫描模型
+                _availableModels = await _modelManagementService!.ScanModelsAsync();
+                
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    ModelSelectorCombo.Items.Clear();
+                    if (_availableModels.Count > 0)
+                    {
+                        foreach (var model in _availableModels)
+                        {
+                            ModelSelectorCombo.Items.Add(new ComboBoxItem 
+                            { 
+                                Content = model.DisplayName, 
+                                Tag = model 
+                            });
+                        }
+                        ModelSelectorCombo.SelectedIndex = 0;
+                        LogMessage($"📦 扫描到 {_availableModels.Count} 个模型文件");
+                    }
+                    else
+                    {
+                        ModelSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未找到模型文件" });
+                        ModelSelectorCombo.SelectedIndex = 0;
+                        LogMessage("⚠️ 未在rwkv_models目录找到模型文件");
+                        LocalModelInfoText.Text = "请将 .safetensors 或 .pth 模型文件放入 rwkv_models 目录";
+                    }
+
+                    // 检查推理工具
+                    var rwkvToolExists = _modelManagementService.ToolExists("rwkv_lightning");
+                    var benchmarkToolExists = _modelManagementService.ToolExists("benchmark");
+                    var llamaCudaExists = _modelManagementService.ToolExists("llama-cuda");
+                    var llamaCpuExists = _modelManagementService.ToolExists("llama-cpu");
+                    var llamaSyclExists = _modelManagementService.ToolExists("llama-sycl");
+                    var llamaVulkanExists = _modelManagementService.ToolExists("llama-vulkan");
+                    
+                    var toolStatus = new List<string>();
+                    if (rwkvToolExists) toolStatus.Add("rwkv_lightning.exe✅");
+                    if (benchmarkToolExists) toolStatus.Add("benchmark.exe✅");
+                    if (llamaCudaExists) toolStatus.Add("llama-server[CUDA]✅");
+                    if (llamaSyclExists) toolStatus.Add("llama-server[SYCL]✅");
+                    if (llamaVulkanExists) toolStatus.Add("llama-server[Vulkan]✅");
+                    if (llamaCpuExists) toolStatus.Add("llama-server[CPU]✅");
+
+                    if (toolStatus.Count == 0)
+                    {
+                        LogMessage("⚠️ 未找到任何推理工具");
+                        LocalModelInfoText.Text = "⚠️ 推理工具不存在";
+                    }
+                    else if (!rwkvToolExists && !benchmarkToolExists && !_modelManagementService.VocabFileExists)
+                    {
+                        // RWKV工具不存在但llama.cpp可能存在
+                        LogMessage($"🔧 可用推理工具: {string.Join(", ", toolStatus)}");
+                        LogMessage("⚠️ RWKV词汇表文件不存在，RWKV推理工具不可用");
+                    }
+                    else
+                    {
+                        LogMessage($"🔧 可用推理工具: {string.Join(", ", toolStatus)}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化GPU和模型列表失败");
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    LogMessage($"❌ 初始化GPU和模型列表失败: {ex.Message}");
+                });
+            }
+        }
+
+        /// <summary>
+        /// RWKV服务状态变化事件处理
+        /// </summary>
+        private void OnRwkvServiceStatusChanged(object? sender, ServiceStatusEventArgs e)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                UpdateLocalServiceStatusUI(e.Status);
+            });
+        }
+
+        /// <summary>
+        /// llama.cpp 服务状态变化事件处理
+        /// </summary>
+        private void OnLlamaCppServiceStatusChanged(object? sender, ServiceStatusEventArgs e)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                UpdateLocalServiceStatusUI(e.Status);
+            });
+        }
+
+        /// <summary>
+        /// Benchmark测试结果输出事件处理
+        /// </summary>
+        private void OnBenchmarkOutputReceived(object? sender, string output)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                LogMessage("📊 ===== Benchmark测试结果 =====");
+                // 按行分割输出并逐行显示
+                var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines)
+                {
+                    LogMessage($"📊 {line}");
+                }
+                LogMessage("📊 ===== 测试完成 =====");
+            });
+        }
+
+        /// <summary>
+        /// 模型转换进度事件处理
+        /// </summary>
+        private void OnModelConversionProgress(object? sender, ConversionProgressEventArgs e)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                LocalModelInfoText.Text = $"🔄 转换中: {e.ModelName} - {e.Status} ({e.Progress}%)";
+            });
+        }
+
+        /// <summary>
+        /// 更新本地服务状态UI
+        /// </summary>
+        private void UpdateLocalServiceStatusUI(RwkvServiceStatus status)
+        {
+            LocalServiceStatusText.Text = status.StateDisplayText;
+            LocalServiceStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
+                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(status.StateColor));
+
+            StartLocalModelBtn.IsEnabled = status.CanStart;
+            StopLocalModelBtn.IsEnabled = status.CanStop;
+
+            if (status.State == ServiceState.Running)
+            {
+                SuggestedConcurrencyText.Text = status.MaxConcurrency.ToString();
+                LocalModelInfoText.Text = $"✅ 运行中 - 端口:{status.Port}, 并发:{status.MaxConcurrency}";
+                
+                if (status.CurrentGpuStatus != null)
+                {
+                    GpuMemoryText.Text = $"显存: {status.CurrentGpuStatus.UsedMemoryGB:F2}/{status.CurrentGpuStatus.TotalMemoryGB:F1}GB";
+                }
+
+                // 更新API地址显示（根据推理工具类型使用不同的API路径）
+                var isLlamaCpp = _currentToolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+                ApiUrlDisplay.Text = isLlamaCpp 
+                    ? status.ApiUrl + "/v1/chat/completions" 
+                    : status.ApiUrl + "/translate/v1/batch-translate";
+            }
+            else if (status.State == ServiceState.Error)
+            {
+                LocalModelInfoText.Text = $"❌ {status.ErrorMessage ?? "未知错误"}";
+            }
+        }
+
+        /// <summary>
+        /// 启动本地模型
+        /// </summary>
+        private async void StartLocalModel(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // 获取选择的推理工具
+                var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
+                var selectedToolContent = selectedToolItem?.Content as string ?? "";
+                var toolName = ResolveToolName(selectedToolContent);
+                _currentToolName = toolName;
+                var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+
+                var selectedModel = GetSelectedModel();
+
+                if (selectedModel == null)
+                {
+                    LogMessage("❌ 未选择模型");
+                    MessageBox.Show("请选择一个模型", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // llama.cpp 工具只支持 GGUF 格式
+                if (isLlamaCpp && selectedModel.Format != ModelFormat.GGUF)
+                {
+                    MessageBox.Show(
+                        "llama.cpp 推理工具仅支持 GGUF 格式模型。\n\n请选择 .gguf 格式的模型，或切换到 rwkv_lightning 推理工具。",
+                        "模型格式不匹配", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // rwkv_lightning/benchmark 不支持 GGUF 格式
+                if (!isLlamaCpp && selectedModel.Format == ModelFormat.GGUF)
+                {
+                    MessageBox.Show(
+                        "RWKV 推理工具不支持 GGUF 格式模型。\n\n请切换到 llama-server 推理工具来使用 GGUF 模型。",
+                        "模型格式不匹配", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // 获取选中的GPU
+                var selectedGpuItem = GpuSelectorCombo.SelectedItem as ComboBoxItem;
+                var selectedGpu = selectedGpuItem?.Tag as GpuInfo;
+                
+                if (selectedGpu == null && _availableGpus.Count > 0)
+                {
+                    selectedGpu = _availableGpus[0];
+                }
+
+                // llama-cpu 不需要GPU
+                if (selectedGpu == null && toolName != "llama-cpu")
+                {
+                    LogMessage("❌ 未选择GPU");
+                    MessageBox.Show("请选择一个GPU", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // 检查模型是否需要转换
+                if (selectedModel.NeedsConversion)
+                {
+                    var result = MessageBox.Show(
+                        $"模型 '{selectedModel.ModelName}' 需要转换为safetensors格式。\n\n是否现在转换？（需要Python环境）",
+                        "模型转换",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        selectedModel = await ConvertModelAsync(selectedModel);
+                        if (selectedModel == null) return;
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+
+                LogMessage($"🚀 正在启动本地模型: {selectedModel.ModelName} (工具: {toolName})");
+                LocalModelInfoText.Text = "🟡 正在启动服务...";
+
+                if (isLlamaCpp)
+                {
+                    // 使用 llama.cpp 推理服务
+                    if (_llamaCppProcessService == null)
+                    {
+                        LogMessage("❌ llama.cpp 服务未初始化");
+                        return;
+                    }
+
+                    var success = await _llamaCppProcessService.StartAsync(selectedModel, selectedGpu, toolName);
+
+                    if (success)
+                    {
+                        var port = _llamaCppProcessService.Status.Port;
+                        var concurrency = _llamaCppProcessService.Status.MaxConcurrency;
+                        LogMessage($"✅ llama-server 启动成功 - 端口: {port}, 并发: {concurrency}");
+
+                        _translationService.SetSuggestedMaxParallelism(concurrency, "rwkv");
+                        UpdateSuggestedParallelism();
+                        LogMessage($"⚡ 已自动应用并发设置: {concurrency}");
+                    }
+                    else
+                    {
+                        LogMessage($"❌ llama-server 启动失败: {_llamaCppProcessService.Status.ErrorMessage}");
+                    }
+                }
+                else
+                {
+                    // 使用 RWKV 推理服务
+                    if (_rwkvProcessService == null)
+                    {
+                        LogMessage("❌ 本地模型服务未初始化");
+                        return;
+                    }
+
+                    // 获取 BSZ 测试选项和增量值
+                    bool enableBszTest = EnableBszTestCheck.IsChecked == true;
+                    int bszIncrement = 10;
+                    if (int.TryParse(BszIncrementText.Text, out int parsedIncrement) && parsedIncrement > 0)
+                    {
+                        bszIncrement = parsedIncrement;
+                    }
+
+                    if (enableBszTest)
+                    {
+                        LogMessage($"🧪 已启用 BSZ 上限测试，增量值: {bszIncrement}");
+                    }
+
+                    var success = await _rwkvProcessService.StartAsync(selectedModel, selectedGpu, toolName: toolName, enableBszTest: enableBszTest, bszIncrement: bszIncrement);
+
+                    if (success)
+                    {
+                        LogMessage($"✅ 本地模型启动成功 - 端口: {_rwkvProcessService.Status.Port}, 并发: {_rwkvProcessService.Status.MaxConcurrency}");
+
+                        _translationService.SetSuggestedMaxParallelism(_rwkvProcessService.Status.MaxConcurrency, "rwkv");
+                        UpdateSuggestedParallelism();
+                        LogMessage($"⚡ 已自动应用计算并发设置: {_rwkvProcessService.Status.MaxConcurrency}");
+                    }
+                    else
+                    {
+                        LogMessage($"❌ 本地模型启动失败: {_rwkvProcessService.Status.ErrorMessage}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "启动本地模型失败");
+                LogMessage($"❌ 启动本地模型失败: {ex.Message}");
+                MessageBox.Show($"启动本地模型失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>
+        /// 停止本地模型
+        /// </summary>
+        private async void StopLocalModel(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var isLlamaCpp = _currentToolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+
+                if (isLlamaCpp && _llamaCppProcessService != null)
+                {
+                    LogMessage("⏹️ 正在停止 llama-server...");
+                    await _llamaCppProcessService.StopAsync();
+                    LogMessage("✅ llama-server 已停止");
+                }
+                else if (_rwkvProcessService != null)
+                {
+                    LogMessage("⏹️ 正在停止本地模型...");
+                    await _rwkvProcessService.StopAsync();
+                    LogMessage("✅ 本地模型已停止");
+                }
+                
+                // 恢复API地址显示
+                UpdateApiUrlDisplay();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "停止本地模型失败");
+                LogMessage($"❌ 停止本地模型失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 刷新本地模型列表
+        /// </summary>
+        private async void RefreshLocalModels(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                LogMessage("🔄 正在刷新GPU和模型列表...");
+                await InitializeGpuAndModelsAsync();
+                LogMessage("✅ 刷新完成");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "刷新本地模型列表失败");
+                LogMessage($"❌ 刷新失败: {ex.Message}");
+            }
+        }
+
+        private ModelInfo? GetSelectedModel()
+        {
+            var selectedModelItem = ModelSelectorCombo.SelectedItem as ComboBoxItem;
+            var selectedModel = selectedModelItem?.Tag as ModelInfo;
+
+            if (selectedModel == null && _availableModels.Count > 0)
+            {
+                selectedModel = _availableModels[0];
+            }
+
+            return selectedModel;
+        }
+
+        private async Task RefreshModelSelectorAsync(string? preferredModelPath = null)
+        {
+            if (_modelManagementService == null) return;
+
+            _availableModels = await _modelManagementService.ScanModelsAsync();
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                ModelSelectorCombo.Items.Clear();
+                if (_availableModels.Count > 0)
+                {
+                    foreach (var model in _availableModels)
+                    {
+                        var item = new ComboBoxItem
+                        {
+                            Content = model.DisplayName,
+                            Tag = model
+                        };
+                        ModelSelectorCombo.Items.Add(item);
+
+                        if (!string.IsNullOrWhiteSpace(preferredModelPath) &&
+                            (string.Equals(model.FilePath, preferredModelPath, StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(model.ConvertedFilePath, preferredModelPath, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            ModelSelectorCombo.SelectedItem = item;
+                        }
+                    }
+
+                    if (ModelSelectorCombo.SelectedIndex < 0)
+                    {
+                        ModelSelectorCombo.SelectedIndex = 0;
+                    }
+                }
+                else
+                {
+                    ModelSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未找到模型文件" });
+                    ModelSelectorCombo.SelectedIndex = 0;
+                }
+            });
+        }
+
+        private async Task<ModelInfo?> ConvertModelAsync(ModelInfo selectedModel)
+        {
+            if (_modelConverter == null)
+            {
+                LogMessage("❌ 模型转换服务未初始化");
+                return null;
+            }
+
+            if (!selectedModel.NeedsConversion && selectedModel.Format != ModelFormat.PyTorch)
+            {
+                LogMessage($"ℹ️ 模型 {selectedModel.ModelName} 不是 .pth 格式，无需转换");
+                return selectedModel;
+            }
+
+            LocalModelInfoText.Text = "🔄 正在转换模型...";
+            var convertedPath = await _modelConverter.ConvertAsync(selectedModel);
+
+            if (string.IsNullOrEmpty(convertedPath))
+            {
+                LocalModelInfoText.Text = "❌ 模型转换失败";
+                MessageBox.Show($"模型转换失败：{selectedModel.ErrorMessage ?? "请检查 Python 环境与转换脚本"}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                return null;
+            }
+
+            LogMessage($"✅ 模型转换成功: {convertedPath}");
+            await RefreshModelSelectorAsync(convertedPath);
+
+            return _availableModels.FirstOrDefault(m =>
+                string.Equals(m.FilePath, convertedPath, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(m.ConvertedFilePath, convertedPath, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(m.ModelName, selectedModel.ModelName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private async void ImportLocalModel(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_modelManagementService == null)
+                {
+                    LogMessage("❌ 模型管理服务未初始化");
+                    return;
+                }
+
+                var openFileDialog = new OpenFileDialog
+                {
+                    Title = "选择要导入的 RWKV 模型",
+                    Filter = "RWKV模型|*.pth;*.safetensors;*.gguf|PyTorch模型|*.pth|SafeTensors模型|*.safetensors|GGUF模型|*.gguf|所有文件|*.*",
+                    Multiselect = false,
+                    CheckFileExists = true
+                };
+
+                if (openFileDialog.ShowDialog() != true) return;
+
+                var sourcePath = openFileDialog.FileName;
+                var fileName = IOPath.GetFileName(sourcePath);
+                var targetPath = IOPath.Combine(_modelManagementService.ModelsDirectory, fileName);
+
+                if (IOFile.Exists(targetPath))
+                {
+                    var overwriteResult = MessageBox.Show(
+                        $"模型目录中已存在同名文件：{fileName}\n\n是否覆盖？",
+                        "导入模型",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (overwriteResult != MessageBoxResult.Yes) return;
+                }
+
+                LocalModelInfoText.Text = "📂 正在导入模型...";
+                var importedPath = await _modelManagementService.ImportModelAsync(sourcePath, overwrite: true);
+                LogMessage($"✅ 模型已导入: {importedPath}");
+
+                await RefreshModelSelectorAsync(importedPath);
+
+                var importedModel = _availableModels.FirstOrDefault(m =>
+                    string.Equals(m.FilePath, importedPath, StringComparison.OrdinalIgnoreCase));
+
+                if (string.Equals(IOPath.GetExtension(importedPath), ".pth", StringComparison.OrdinalIgnoreCase) && importedModel != null)
+                {
+                    var convertNow = MessageBox.Show(
+                        $"已导入 .pth 模型：{importedModel.ModelName}\n\n是否立即转换为 .safetensors？",
+                        "转换模型",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (convertNow == MessageBoxResult.Yes)
+                    {
+                        var convertedModel = await ConvertModelAsync(importedModel);
+                        if (convertedModel != null)
+                        {
+                            LocalModelInfoText.Text = $"✅ 已导入并转换: {convertedModel.ModelName}";
+                        }
+                        return;
+                    }
+
+                    LocalModelInfoText.Text = $"🔄 已导入 .pth 模型，启动前可点击“转换选中.pth”";
+                }
+                else
+                {
+                    LocalModelInfoText.Text = $"✅ 已导入模型: {fileName}";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "导入本地模型失败");
+                LogMessage($"❌ 导入模型失败: {ex.Message}");
+                MessageBox.Show($"导入模型失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void ConvertSelectedPthModel(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var selectedModel = GetSelectedModel();
+                if (selectedModel == null)
+                {
+                    MessageBox.Show("请先选择一个模型", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                if (selectedModel.Format != ModelFormat.PyTorch && !selectedModel.NeedsConversion)
+                {
+                    MessageBox.Show("当前选中的模型不是 .pth 文件，无需转换", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                var result = MessageBox.Show(
+                    $"是否将模型 '{selectedModel.ModelName}' 转换为 safetensors 格式？\n\n该操作需要本机可用的 Python 环境。",
+                    "转换 .pth 模型",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (result != MessageBoxResult.Yes) return;
+
+                var convertedModel = await ConvertModelAsync(selectedModel);
+                if (convertedModel != null)
+                {
+                    LocalModelInfoText.Text = $"✅ 模型转换完成: {convertedModel.ModelName}";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "转换选中模型失败");
+                LogMessage($"❌ 转换选中模型失败: {ex.Message}");
+                MessageBox.Show($"转换模型失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>
+        /// 从 ModelScope 下载模型
+        /// </summary>
+        private async void DownloadModelFromSite(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_modelDownloadService == null)
+                {
+                    LogMessage("❌ 下载服务未初始化");
+                    return;
+                }
+
+                // 从输入框获取ModelScope URL并更新下载服务配置
+                var modelScopeUrl = ModelScopeUrlText.Text.Trim();
+                if (string.IsNullOrEmpty(modelScopeUrl))
+                {
+                    MessageBox.Show("请输入ModelScope下载地址", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                if (!_modelDownloadService.SetModelScopeConfigFromUrl(modelScopeUrl))
+                {
+                    MessageBox.Show(
+                        "无法解析ModelScope地址，请检查格式。\n\n正确格式示例:\nhttps://www.modelscope.cn/models/AlicLi/rwkv7-g1-libtorch-st/files",
+                        "地址格式错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // 使用解析后的URL作为显示地址
+                var displayUrl = _modelDownloadService.GetModelScopeFilesUrl();
+
+                // 根据当前推理工具类型确定模型格式提示
+                var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
+                var selectedToolContent = selectedToolItem?.Content as string ?? "";
+                var currentTool = ResolveToolName(selectedToolContent);
+                var isLlamaCpp = currentTool is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+                var formatHint = isLlamaCpp
+                    ? "模型为 GGUF 格式，可使用 llama-server 推理。"
+                    : "模型为 safetensors 格式，可直接使用。";
+
+                // 先获取文件列表
+                LogMessage("📥 正在获取 ModelScope 文件列表...");
+                LocalModelInfoText.Text = "正在获取文件列表...";
+                
+                var allFiles = await _modelDownloadService.GetModelFilesAsync();
+                
+                if (allFiles.Count == 0)
+                {
+                    MessageBox.Show("无法获取文件列表，请检查ModelScope仓库地址是否正确。", "获取失败", 
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LocalModelInfoText.Text = "获取文件列表失败";
+                    return;
+                }
+
+                // 弹出模型选择对话框
+                var selectWindow = new Windows.ModelSelectWindow(allFiles, displayUrl, formatHint);
+                selectWindow.Owner = this;
+                var dialogResult = selectWindow.ShowDialog();
+                
+                if (dialogResult != true || selectWindow.SelectedFiles.Count == 0)
+                {
+                    LogMessage("⏹️ 已取消模型下载");
+                    LocalModelInfoText.Text = "下载已取消";
+                    return;
+                }
+                
+                var selectedFiles = selectWindow.SelectedFiles;
+                var totalSize = selectedFiles.Sum(f => f.SizeBytes);
+                var sizeStr = totalSize >= 1073741824 
+                    ? $"{totalSize / 1073741824.0:F2} GB" 
+                    : $"{totalSize / 1048576.0:F1} MB";
+
+                // 确认下载
+                var result = MessageBox.Show(
+                    $"即将下载 {selectedFiles.Count} 个模型文件（共 {sizeStr}）到 rwkv_models 目录。\n\n" +
+                    $"下载源: {displayUrl}\n" +
+                    $"{formatHint}\n\n" +
+                    "是否继续？",
+                    "模型下载",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (result != MessageBoxResult.Yes) return;
+
+                // 获取模型保存目录（使用项目根目录）
+                var baseDir = PathHelper.GetSafeBaseDirectory();
+                var projectRoot = PathHelper.FindProjectRoot(baseDir);
+                var modelsDir = IOPath.Combine(projectRoot, "rwkv_models");
+
+                // 准备下载UI
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    DownloadModelBtn.IsEnabled = false;
+                    CancelDownloadBtn.IsEnabled = true;
+                    ModelDownloadProgress.Visibility = Visibility.Visible;
+                    ModelDownloadProgress.Value = 0;
+                    DownloadProgressText.Visibility = Visibility.Visible;
+                    DownloadProgressText.Text = "正在连接 ModelScope...";
+                });
+
+                // 创建下载进度跟踪
+                var progress = new Progress<Services.RwkvLocal.DownloadProgressEventArgs>(args =>
+                {
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        ModelDownloadProgress.Value = args.OverallProgress > 0 ? args.OverallProgress : args.Progress;
+                        DownloadProgressText.Text = args.Status;
+                    });
+                });
+
+                // 开始下载
+                _downloadCts = new CancellationTokenSource();
+
+                LogMessage("📥 开始从 ModelScope 下载模型...");
+                LocalModelInfoText.Text = "正在下载模型，请稍候...";
+
+                var downloadedFiles = await _modelDownloadService.DownloadModelFilesAsync(
+                    selectedFiles,
+                    modelsDir,
+                    progress,
+                    _downloadCts.Token);
+
+                LogMessage($"✅ 模型下载完成！共 {downloadedFiles.Count} 个文件");
+                LocalModelInfoText.Text = $"下载完成！共 {downloadedFiles.Count} 个文件已保存到 rwkv_models";
+
+                // 刷新模型列表
+                await InitializeGpuAndModelsAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("⏹️ 模型下载已取消");
+                LocalModelInfoText.Text = "下载已取消";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "下载模型失败");
+                LogMessage($"❌ 下载模型失败: {ex.Message}");
+                MessageBox.Show($"下载模型失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    DownloadModelBtn.IsEnabled = true;
+                    CancelDownloadBtn.IsEnabled = false;
+                    ModelDownloadProgress.Visibility = Visibility.Collapsed;
+                    DownloadProgressText.Visibility = Visibility.Collapsed;
+                    _downloadCts?.Dispose();
+                    _downloadCts = null;
+                });
+            }
+        }
+
+        /// <summary>
+        /// 取消模型下载
+        /// </summary>
+        private void CancelModelDownload(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _downloadCts?.Cancel();
+                LogMessage("⏹️ 已请求取消下载...");
+                CancelDownloadBtn.IsEnabled = false;
+                CancelDownloadBtn.Content = "取消中...";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "取消下载失败");
+            }
+        }
+
+        /// <summary>
+        /// 下载状态变更事件处理
+        /// </summary>
+        private void OnDownloadStatusChanged(object? sender, string status)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                LocalModelInfoText.Text = status;
+            });
+        }
+
+        /// <summary>
+        /// 下载进度变更事件处理
+        /// </summary>
+        private void OnDownloadProgressChanged(object? sender, Services.RwkvLocal.DownloadProgressEventArgs args)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (args.TotalFiles > 0)
+                {
+                    DownloadProgressText.Text = $"[{args.OverallFileIndex}/{args.TotalFiles}] {args.Status}";
+                }
+                else
+                {
+                    DownloadProgressText.Text = args.Status;
+                }
+            });
+        }
+
+        /// <summary>
+        /// 下载完成事件处理
+        /// </summary>
+        private void OnDownloadCompleted(object? sender, DownloadCompletedEventArgs args)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (args.Success)
+                {
+                    LogMessage($"✅ 文件下载完成: {args.FileName}");
+                }
+                else
+                {
+                    LogMessage($"❌ 文件下载失败: {args.FileName} - {args.ErrorMessage}");
+                }
+            });
         }
 
         /// <summary>
@@ -251,7 +1255,7 @@ namespace DocumentTranslator
             TranslationOnlyOutput.Checked += OnOutputFormatChanged;
 
             // 设置窗口图标和标题
-            this.Title = "RWKV_术语翻译助手 v3.1";
+            this.Title = "RWKV文档术语翻译助手 v3.1";
 
             // 初始化翻译方向显示
             UpdateTranslationDirection();
@@ -312,7 +1316,15 @@ namespace DocumentTranslator
             {
                 int val = Math.Max(1, (int)Math.Round(ParallelismSlider.Value));
                 _translationService.SetMaxParallelismOverride(val);
-                LogMessage($"💾 已应用RWKV引擎并发设置: {val}");
+                
+                // 同步每批次并发上限设置
+                if (int.TryParse(BatchConcurrencyLimitText.Text, out var batchLimit) && batchLimit >= 0)
+                {
+                    ConcurrencyCalculator.BatchConcurrencyLimit = batchLimit;
+                    _translationService.BatchConcurrencyLimit = batchLimit;
+                }
+                
+                LogMessage($"💾 已应用并发设置: 最大并发={val}, 每批次上限={ConcurrencyCalculator.BatchConcurrencyLimit}");
             }
             catch (Exception ex)
             {
@@ -463,12 +1475,17 @@ namespace DocumentTranslator
         {
             try
             {
+                if (_configurationManager == null)
+                {
+                    ApiUrlDisplay.Text = "加载中...";
+                    return;
+                }
                 var config = _configurationManager.GetTranslatorConfig("rwkv");
                 ApiUrlDisplay.Text = config.ApiUrl;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "获取API地址失败");
+                _logger?.LogError(ex, "获取API地址失败");
                 ApiUrlDisplay.Text = "获取失败";
             }
         }
@@ -859,8 +1876,82 @@ namespace DocumentTranslator
 
         private void ShowAbout(object sender, RoutedEventArgs e)
         {
-            MessageBox.Show("RWKV_术语文档翻译助手 @2024~2026\n\n支持Word、PDF、Excel、PPT、TXT文档\n\n糖醋鹦鹉 © 2026",
+            MessageBox.Show("RWKV文档术语翻译助手 @2024~2026\n\n支持Word、Excel文档\n\n Github - LuckySongXiao © 2024",
                           "关于", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>
+        /// BSZ 增量输入框只允许数字
+        /// </summary>
+        private void BszIncrementText_PreviewTextInput(object sender, TextCompositionEventArgs e)
+        {
+            // 只允许数字
+            e.Handled = !Regex.IsMatch(e.Text, "^[0-9]+$");
+        }
+
+        /// <summary>
+        /// 从推理工具ComboBox内容解析工具名称
+        /// </summary>
+        private static string ResolveToolName(string toolContent)
+        {
+            if (toolContent.Contains("CUDA") && toolContent.Contains("llama"))
+                return "llama-cuda";
+            if (toolContent.Contains("SYCL") && toolContent.Contains("llama"))
+                return "llama-sycl";
+            if (toolContent.Contains("Vulkan") && toolContent.Contains("llama"))
+                return "llama-vulkan";
+            if (toolContent.Contains("CPU") && toolContent.Contains("llama"))
+                return "llama-cpu";
+            if (toolContent.Contains("benchmark"))
+                return "benchmark";
+            return "rwkv_lightning";
+        }
+
+        /// <summary>
+        /// 推理工具选择变化时，自动切换ModelScope下载地址
+        /// </summary>
+        private void InferenceToolCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
+                var selectedToolContent = selectedToolItem?.Content as string ?? "";
+                var toolName = ResolveToolName(selectedToolContent);
+                var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+
+                if (isLlamaCpp)
+                {
+                    // 切换到GGUF模型下载地址
+                    ModelScopeUrlText.Text = DefaultGgufModelScopeUrl;
+                    InferenceToolDescription.Text = toolName switch
+                    {
+                        "llama-cuda" => "💡 llama-server [CUDA] - NVIDIA GPU加速，需安装CUDA驱动",
+                        "llama-sycl" => "💡 llama-server [SYCL] - Intel GPU加速（Arc独显/Xe核显）",
+                        "llama-vulkan" => "💡 llama-server [Vulkan] - AMD/通用GPU加速",
+                        "llama-cpu" => "💡 llama-server [CPU] - 纯CPU推理，无需GPU",
+                        _ => "💡 llama-server.exe 使用GGUF格式模型，提供OpenAI兼容API"
+                    };
+                    LogMessage($"🔧 已切换到 {toolName} 推理工具，下载地址已自动切换为GGUF模型仓库");
+                }
+                else
+                {
+                    // 切换到SafeTensors模型下载地址
+                    ModelScopeUrlText.Text = DefaultStModelScopeUrl;
+                    if (toolName == "benchmark")
+                    {
+                        InferenceToolDescription.Text = "💡 benchmark.exe 仅用于性能测试，不提供翻译API服务";
+                    }
+                    else
+                    {
+                        InferenceToolDescription.Text = "💡 rwkv_lightning.exe 提供完整的翻译API服务，使用safetensors格式模型";
+                    }
+                    LogMessage($"🔧 已切换到 {toolName} 推理工具，下载地址已自动切换为SafeTensors模型仓库");
+                }
+
+                // 切换推理工具后刷新本地模型列表（不同工具对应不同格式的模型）
+                _ = InitializeGpuAndModelsAsync();
+            }
+            catch { }
         }
 
         private void OpenTranslationRulesEditor(object sender, RoutedEventArgs e)
@@ -988,7 +2079,7 @@ namespace DocumentTranslator
             try
             {
                 // 获取输出目录路径
-                var outputDir = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+                var outputDir = IOPath.Combine(PathHelper.GetSafeBaseDirectory(), "输出");
 
                 // 如果输出目录不存在，则创建它
                 if (!IODirectory.Exists(outputDir))
@@ -1148,6 +2239,11 @@ namespace DocumentTranslator
 
         protected override void OnClosed(EventArgs e)
         {
+            // 停止本地模型服务
+            _rwkvProcessService?.StopAsync().Wait(TimeSpan.FromSeconds(5));
+            _rwkvProcessService?.Dispose();
+            _gpuResourceService?.Dispose();
+
             // 清理资源
             _translationService?.StopCurrentOperations();
             base.OnClosed(e);

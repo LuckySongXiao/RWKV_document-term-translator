@@ -12,6 +12,7 @@ using iText.Kernel.Pdf;
 using iText.Kernel.Pdf.Canvas.Parser;
 using iText.Kernel.Pdf.Canvas.Parser.Listener;
 using iText.Kernel.Pdf.Canvas.Parser.Data;
+using DocumentTranslator.Helpers;
 using Microsoft.Extensions.Logging;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
@@ -47,7 +48,7 @@ namespace DocumentTranslator.Services.Translation
 
         private bool _useOcr = true;
         private bool _useAdobeAcrobatPreprocess = false;
-        private string _tesseractDataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tessdata");
+        private string _tesseractDataPath;
         private TesseractEngine _ocrEngine;
         private TranslationOutputConfig _outputConfig = new TranslationOutputConfig();
 
@@ -72,6 +73,7 @@ namespace DocumentTranslator.Services.Translation
             _translationService = translationService ?? throw new ArgumentNullException(nameof(translationService));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _termExtractor = new TermExtractor();
+            _tesseractDataPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "tessdata");
 
             _useOcr = ocrAvailable;
 
@@ -183,7 +185,7 @@ namespace DocumentTranslator.Services.Translation
                 throw new FileNotFoundException("文件不存在");
             }
 
-            var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+            var outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);

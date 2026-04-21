@@ -1,0 +1,43 @@
+{
+  "current_translator_type": "immersive",
+  "immersive_translator": {
+    "api_url": "https://api.openai.com/v1",
+    "api_key": "your-api-key-here",
+    "model": "gpt-3.5-turbo",
+    "translation_engine": "openai",
+    "timeout": 60
+  },
+  "zhipuai_translator": {
+    "model": "glm-4-flash-250414",
+    "temperature": 0.2,
+    "timeout": 60
+  },
+  "siliconflow_translator": {
+    "model": "deepseek-ai/DeepSeek-V3",
+    "timeout": 60
+  },
+  "ollama_translator": {
+    "model": "gemma3:4b",
+    "api_url": "http://localhost:11434",
+    "model_list_timeout": 10,
+    "translate_timeout": 60
+  },
+  "rwkv_translator": {
+    "api_url": "http://localhost:8000/translate/v1/batch-translate",
+    "model": "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118",
+    "timeout": 60,
+    "use_batch_translate": false
+  },
+  "hunyuan_translator": {
+    "api_url": "http://rwkv.xq0.cn:46132/v1",
+    "api_key": "none",
+    "model": "/home/songxiao/.cache/modelscope/hub/models/Tencent-Hunyuan/Hunyuan-MT-Chimera-7B-fp8",
+    "temperature": 0.7,
+    "top_p": 0.6,
+    "frequency_penalty": 1.05,
+    "max_tokens": 2048,
+    "top_k": 20,
+    "use_chimera_mode": false,
+    "timeout": 60
+  }
+}

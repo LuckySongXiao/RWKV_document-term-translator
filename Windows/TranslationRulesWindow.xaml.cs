@@ -4,17 +4,19 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Windows
 {
     public partial class TranslationRulesWindow : Window
     {
-        private readonly string _rulesPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "translation_rules.txt");
+        private readonly string _rulesPath;
         private List<string> _rules = new List<string>();
 
         public TranslationRulesWindow()
         {
             InitializeComponent();
+            _rulesPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "translation_rules.txt");
             LoadRules();
         }
 
@@ -116,7 +118,7 @@ namespace DocumentTranslator.Windows
         {
             try
             {
-                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "translation_rules.txt");
+                var path = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "translation_rules.txt");
                 if (File.Exists(path))
                 {
                     return File.ReadAllLines(path).Where(l => !string.IsNullOrWhiteSpace(l));

@@ -47,10 +47,9 @@
 
                             <TextBlock Text="API地址" FontWeight="Bold" Margin="0,5"/>
                             <ComboBox x:Name="rwkvApiUrl" Height="35" Margin="0,2,0,10" IsEditable="True">
-                                <ComboBoxItem Content="http://locahost:8000/translate/v1/batch-translate"/>
-                                <ComboBoxItem Content="http://locahost:8000/v1/chat/completions"/>
-                                <ComboBoxItem Content="http://locahost:8000/v2/chat/completions"/>
-                                <ComboBoxItem Content="http://locahost:8000/v3/chat/completions"/>
+                                <ComboBoxItem Content="http://localhost:8000/translate/v1/batch-translate"/>
+                                <ComboBoxItem Content="http://localhost:8000/v1/chat/completions"/>
+                                <ComboBoxItem Content="http://localhost:8000/v2/chat/completions"/>
                             </ComboBox>
 
                             <CheckBox x:Name="rwkvUseBatchTranslate" Content="使用批量翻译API (/translate/v1/batch-translate)" Margin="0,5"/>

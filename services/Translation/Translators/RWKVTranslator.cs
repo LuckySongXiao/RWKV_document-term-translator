@@ -9,17 +9,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace DocumentTranslator.Services.Translation.Translators
 {
-    /// <summary>
-    /// RWKV翻译器，用于RWKV环境的API调用
-    /// 支持的API接口：
-    /// 1. /translate/v1/batch-translate - 批量翻译（非流式）
-    /// 2. /v1/chat/completions - V1：基础批处理（支持流式和非流式）
-    /// 3. /v2/chat/completions - V2：连续批处理（支持流式和非流式）
-    /// 4. /v3/chat/completions - V3：异步高并发（VLLM风格，支持流式和非流式）
-    /// </summary>
+        /// <summary>
+        /// RWKV翻译器，用于RWKV环境的API调用
+        /// 只使用translate模式: /translate/v1/batch-translate
+        /// </summary>
     public class RWKVTranslator : BaseTranslator
     {
         private readonly string _apiUrl;
@@ -27,6 +24,7 @@ namespace DocumentTranslator.Services.Translation.Translators
         private readonly int _timeout;
         private readonly string _apiKey;
         private readonly bool _useBatchTranslate;
+        private readonly bool _isLlamaCpp;  // 是否使用llama.cpp推理（续写接口）
         private readonly HttpClient _httpClient;
         private static System.Threading.SemaphoreSlim _globalRequestSemaphore;
         private static readonly object _semaphoreLock = new object();
@@ -46,52 +44,7 @@ namespace DocumentTranslator.Services.Translation.Translators
             var u = url.TrimEnd('/');
             var lower = u.ToLowerInvariant();
 
-            // 处理本地URL，确保正确格式
-            if (lower.StartsWith("http://localhost:") || lower.StartsWith("http://127.0.0.1:"))
-            {
-                // 尝试获取WSL IP地址
-                string wslIp = GetWslIpAddress();
-                if (!string.IsNullOrEmpty(wslIp))
-                {
-                    // 使用WSL IP地址替换localhost
-                    var port = u.Substring(u.LastIndexOf(":") + 1);
-                    u = $"http://{wslIp}:{port}";
-                    _logger.LogInformation($"检测到WSL环境，使用WSL IP地址: {u}");
-                }
-
-                // 清理URL中已有的API路径
-                if (lower.Contains("/translate/v1/batch-translate"))
-                {
-                    u = u.Substring(0, lower.IndexOf("/translate/v1/batch-translate"));
-                }
-                else if (lower.Contains("/translate/v1"))
-                {
-                    u = u.Substring(0, lower.IndexOf("/translate/v1"));
-                }
-
-                if (batchMode)
-                {
-                    if (lower.EndsWith("batch-translate")) return u + "/batch-translate";
-                    return u + "/translate/v1/batch-translate";
-                }
-                else
-                {
-                    // 非批量模式使用chat/completions
-                if (lower.Contains("/chat/completions"))
-                {
-                    if (lower.Contains("/v3/chat/completions")) return u + "/v3/chat/completions";
-                    if (lower.Contains("/v2/chat/completions")) return u + "/v2/chat/completions";
-                    if (lower.Contains("/v1/chat/completions")) return u + "/v1/chat/completions";
-                    return u + "/v3/chat/completions";
-                }
-                
-                // 默认使用v3 chat completions
-                return u + "/v3/chat/completions";
-            }
-            }
-
-            // 非本地URL处理
-            // 清理URL中已有的API路径
+            // 第一步：从URL中提取基础地址（去掉已有的API路径）
             if (lower.Contains("/translate/v1/batch-translate"))
             {
                 u = u.Substring(0, lower.IndexOf("/translate/v1/batch-translate"));
@@ -100,87 +53,51 @@ namespace DocumentTranslator.Services.Translation.Translators
             {
                 u = u.Substring(0, lower.IndexOf("/translate/v1"));
             }
-
-            if (batchMode)
+            else if (lower.Contains("/chat/completions"))
             {
-                if (lower.Contains("/chat/completions"))
+                var chatIndex = lower.IndexOf("/chat/completions");
+                u = u.Substring(0, chatIndex);
+                // 去掉 /v1, /v2, /v3 等版本前缀
+                if (u.EndsWith("/v1", StringComparison.OrdinalIgnoreCase) ||
+                    u.EndsWith("/v2", StringComparison.OrdinalIgnoreCase) ||
+                    u.EndsWith("/v3", StringComparison.OrdinalIgnoreCase))
                 {
-                    var chatIndex = lower.IndexOf("/chat/completions");
-                    u = u.Substring(0, chatIndex);
+                    u = u.Substring(0, u.LastIndexOf('/'));
                 }
-                if (lower.EndsWith("batch-translate")) return u + "/batch-translate";
-                if (lower.Contains("/translate/v1")) return u + "/translate/v1/batch-translate";
-                return u + "/translate/v1/batch-translate";
+            }
+            else if (lower.Contains("/completions"))
+            {
+                var compIndex = lower.IndexOf("/completions");
+                u = u.Substring(0, compIndex);
+                if (u.EndsWith("/v1", StringComparison.OrdinalIgnoreCase) ||
+                    u.EndsWith("/v2", StringComparison.OrdinalIgnoreCase))
+                {
+                    u = u.Substring(0, u.LastIndexOf('/'));
+                }
+            }
+
+            // 第二步：基于基础地址拼接API路径
+            if (_isLlamaCpp)
+            {
+                // llama.cpp 使用续写接口做翻译
+                return u + "/v1/completions";
             }
             else
             {
-                // 非批量模式使用chat/completions
-                if (lower.Contains("/chat/completions"))
-                {
-                    // 优先保留原有的V版本
-                    if (lower.Contains("/v3/chat/completions")) return u + "/v3/chat/completions";
-                    if (lower.Contains("/v2/chat/completions")) return u + "/v2/chat/completions";
-                    if (lower.Contains("/v1/chat/completions")) return u + "/v1/chat/completions";
-                    
-                    // 如果没有明确V版本，但包含chat/completions，尝试升级到V3（如果原URL不含v1/v2）
-                    // 这里我们保守一点，只在纯chat/completions时默认使用V3
-                    return u + "/v3/chat/completions";
-                }
-                
-                // 如果URL不包含chat/completions，尝试智能推断
-                if (lower.Contains("/v3")) return u + "/v3/chat/completions";
-                
-                // 默认使用v3 chat completions以获得最佳并发性能
-                return u + "/v3/chat/completions";
+                // rwkv_lightning 使用translate模式
+                return u + "/translate/v1/batch-translate";
             }
-        }
-
-        private string GetWslIpAddress()
-        {
-            try
-            {
-                // 执行wsl命令获取IP地址
-                var process = new System.Diagnostics.Process
-                {
-                    StartInfo = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "wsl",
-                        Arguments = "hostname -I",
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-
-                process.Start();
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-
-                if (process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
-                {
-                    // 提取第一个IP地址
-                    var ipAddresses = output.Trim().Split(' ');
-                    if (ipAddresses.Length > 0)
-                    {
-                        return ipAddresses[0].Trim();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug($"获取WSL IP地址失败: {ex.Message}");
-            }
-            return null;
         }
 
         public RWKVTranslator(ILogger logger, string apiUrl, string model = "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118", 
-            int timeout = 60, string apiKey = null, bool useBatchTranslate = false, int maxConcurrency = 30)
+            int timeout = 60, string apiKey = null, bool useBatchTranslate = true, int maxConcurrency = 30, bool isLlamaCpp = false)
             : base(logger)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _timeout = timeout;
             _apiKey = apiKey ?? string.Empty;
-            _useBatchTranslate = useBatchTranslate;
+            _isLlamaCpp = isLlamaCpp;
+            _useBatchTranslate = isLlamaCpp ? false : true; // llama.cpp使用续写接口，rwkv使用translate模式
 
             lock (_semaphoreLock)
             {
@@ -218,7 +135,7 @@ namespace DocumentTranslator.Services.Translation.Translators
 
             _httpClient = new HttpClient(handler)
             {
-                Timeout = TimeSpan.FromSeconds(timeout)
+                Timeout = TimeSpan.FromSeconds(IsLocalRwkvUrl(_apiUrl) ? Math.Max(timeout, 300) : timeout)
             };
             
             _httpClient.DefaultRequestHeaders.Add("User-Agent", "DocumentTranslator/1.0");
@@ -231,6 +148,28 @@ namespace DocumentTranslator.Services.Translation.Translators
             }
 
             _logger.LogInformation($"初始化RWKV翻译器，模型: {model}, API URL: {_apiUrl}, 批量翻译模式: {_useBatchTranslate}, 已提供API Key: {!string.IsNullOrEmpty(_apiKey)}, 翻译日志路径: {_translationLogPath}, {_translationLogPath2}");
+        }
+
+        public async Task<IReadOnlyList<string>> TranslateBatchAsync(IReadOnlyList<string> texts, string sourceLang = "zh", string targetLang = "en")
+        {
+            if (texts == null || texts.Count == 0)
+            {
+                return Array.Empty<string>();
+            }
+
+            var currentMaxConcurrency = _getMaxConcurrency?.Invoke() ?? _maxConcurrency;
+            UpdateSemaphoreIfNeeded(currentMaxConcurrency);
+
+            var currentSemaphore = _globalRequestSemaphore;
+            await currentSemaphore.WaitAsync();
+            try
+            {
+                return await TranslateWithBatchApiAsync(texts, sourceLang, targetLang);
+            }
+            finally
+            {
+                currentSemaphore.Release();
+            }
         }
 
         public override async Task<string> TranslateAsync(string text, Dictionary<string, string> terminologyDict = null,
@@ -266,34 +205,7 @@ namespace DocumentTranslator.Services.Translation.Translators
                 try
                 {
                     var currentMaxConcurrency = _getMaxConcurrency?.Invoke() ?? _maxConcurrency;
-
-                    // 动态更新并发控制
-                    if (currentMaxConcurrency != _maxConcurrency)
-                    {
-                        lock (_semaphoreLock)
-                        {
-                            if (currentMaxConcurrency != _maxConcurrency)
-                            {
-                                _maxConcurrency = currentMaxConcurrency;
-                                _globalRequestSemaphore = new System.Threading.SemaphoreSlim(currentMaxConcurrency);
-                                _logger.LogInformation($"RWKV全局请求信号量已动态更新为: {currentMaxConcurrency}");
-                            }
-                        }
-                    }
-
-                    // 确保信号量已初始化
-                    if (_globalRequestSemaphore == null)
-                    {
-                        lock (_semaphoreLock)
-                        {
-                            if (_globalRequestSemaphore == null)
-                            {
-                                _maxConcurrency = currentMaxConcurrency;
-                                _globalRequestSemaphore = new System.Threading.SemaphoreSlim(currentMaxConcurrency);
-                                _logger.LogInformation($"RWKV全局请求信号量已初始化: {currentMaxConcurrency}");
-                            }
-                        }
-                    }
+                    UpdateSemaphoreIfNeeded(currentMaxConcurrency);
 
                     // 使用局部变量捕获当前信号量，防止在等待期间信号量被替换（由于并发设置变更）
                     // 导致 release 错误的信号量对象
@@ -303,20 +215,18 @@ namespace DocumentTranslator.Services.Translation.Translators
                     {
                         string translation;
 
-                        if (_useBatchTranslate)
-                        {
-                            translation = await TranslateWithBatchApiAsync(finalPromptText, sourceLang, targetLang);
-                        }
-                        else
-                        {
-                            translation = await TranslateWithChatApiAsync(finalPromptText, sourceLang, targetLang);
-                        }
+                        // 只使用translate模式
+                        translation = await TranslateWithBatchApiAsync(finalPromptText, sourceLang, targetLang);
 
                         // 如果已经因为质量问题重试过，不再进行质量检测，直接返回译文
                         if (hasQualityRetried)
                         {
                             _logger.LogTrace($"质量重试后直接返回译文，原文: {text}, 译文: {translation}");
                             LogTranslation(textForLog, translation, sourceLang, targetLang);
+                            if (finalPromptText != text)
+                            {
+                                LogPreprocessedTranslation(finalPromptText, translation, sourceLang, targetLang);
+                            }
                             return translation;
                         }
 
@@ -326,6 +236,10 @@ namespace DocumentTranslator.Services.Translation.Translators
                         // 翻译成功，返回译文
                         _logger.LogTrace($"翻译成功，原文: {text}, 译文: {processedTranslation}");
                         LogTranslation(textForLog, processedTranslation, sourceLang, targetLang);
+                        if (finalPromptText != text)
+                        {
+                            LogPreprocessedTranslation(finalPromptText, processedTranslation, sourceLang, targetLang);
+                        }
 
                         return processedTranslation;
                     }
@@ -383,31 +297,37 @@ namespace DocumentTranslator.Services.Translation.Translators
                 {
                     string translation;
 
-                    if (_useBatchTranslate)
-                    {
-                        translation = await TranslateWithBatchApiAsync(finalPromptText, sourceLang, targetLang);
-                    }
-                    else
-                    {
-                        translation = await TranslateWithChatApiAsync(finalPromptText, sourceLang, targetLang);
-                    }
+                    // 只使用translate模式
+                    translation = await TranslateWithBatchApiAsync(finalPromptText, sourceLang, targetLang);
 
                     // 如果已经因为质量问题重试过，不再进行质量检测，直接返回译文
                     if (hasQualityRetried)
                     {
                         _logger.LogTrace($"质量重试后直接返回译文，原文: {text}, 译文: {translation}");
+                        if (finalPromptText != text)
+                        {
+                            LogPreprocessedTranslation(finalPromptText, translation, sourceLang, targetLang);
+                        }
                         return translation;
                     }
 
                     try
                     {
                         var processedTranslation = ProcessAbnormalTranslation(text, translation, sourceLang, targetLang);
+                        if (finalPromptText != text)
+                        {
+                            LogPreprocessedTranslation(finalPromptText, processedTranslation, sourceLang, targetLang);
+                        }
                         return processedTranslation;
                     }
                     catch (Exception ex)
                     {
                         // 最后一次尝试如果质量仍然不佳，直接返回译文
                         _logger.LogWarning(ex, $"最后一次尝试译文质量不佳，直接返回译文 - 原文: {text}");
+                        if (finalPromptText != text)
+                        {
+                            LogPreprocessedTranslation(finalPromptText, translation, sourceLang, targetLang);
+                        }
                         return translation;
                     }
                 }
@@ -451,203 +371,242 @@ namespace DocumentTranslator.Services.Translation.Translators
             }
         }
 
-        private async Task<string> TranslateWithBatchApiAsync(string promptText, string sourceLang, string targetLang)
+        private static bool IsLocalRwkvUrl(string url)
         {
+            var lower = url?.ToLowerInvariant() ?? string.Empty;
+            return lower.StartsWith("http://localhost:") || lower.StartsWith("http://127.0.0.1:");
+        }
+
+        private void UpdateSemaphoreIfNeeded(int currentMaxConcurrency)
+        {
+            if (currentMaxConcurrency != _maxConcurrency)
+            {
+                lock (_semaphoreLock)
+                {
+                    if (currentMaxConcurrency != _maxConcurrency)
+                    {
+                        _maxConcurrency = currentMaxConcurrency;
+                        _globalRequestSemaphore = new System.Threading.SemaphoreSlim(currentMaxConcurrency);
+                        _logger.LogInformation($"RWKV全局请求信号量已动态更新为: {currentMaxConcurrency}");
+                    }
+                }
+            }
+
+            if (_globalRequestSemaphore == null)
+            {
+                lock (_semaphoreLock)
+                {
+                    if (_globalRequestSemaphore == null)
+                    {
+                        _maxConcurrency = currentMaxConcurrency;
+                        _globalRequestSemaphore = new System.Threading.SemaphoreSlim(currentMaxConcurrency);
+                        _logger.LogInformation($"RWKV全局请求信号量已初始化: {currentMaxConcurrency}");
+                    }
+                }
+            }
+        }
+
+        private string GetBatchApiUrl()
+        {
+            return Normalize(_apiUrl, true);
+        }
+
+        private async Task<IReadOnlyList<string>> TranslateWithBatchApiAsync(IReadOnlyList<string> promptTexts, string sourceLang, string targetLang)
+        {
+            // llama.cpp 使用续写接口(/v1/completions)做翻译
+            if (_isLlamaCpp)
+            {
+                return await TranslateWithCompletionApiAsync(promptTexts, sourceLang, targetLang);
+            }
+
+            // rwkv_lightning 使用批量翻译接口
             var requestData = new
             {
                 source_lang = GetLanguageCode(sourceLang),
                 target_lang = GetLanguageCode(targetLang),
-                text_list = new[] { promptText }
+                text_list = promptTexts
             };
 
-            var jsonContent = JsonConvert.SerializeObject(requestData);
-            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+            var batchApiUrl = GetBatchApiUrl();
+            int maxRetries = 3;
+            int retryDelayMs = 2000;
 
-            try
+            for (int attempt = 0; attempt < maxRetries; attempt++)
             {
-                var response = await _httpClient.PostAsync(_apiUrl, content);
-
-                if (response.IsSuccessStatusCode)
+                try
                 {
+                    var jsonContent = JsonConvert.SerializeObject(requestData);
+                    var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+                    var response = await _httpClient.PostAsync(batchApiUrl, content);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        var statusCode = (int)response.StatusCode;
+
+                        if (statusCode == 404)
+                        {
+                            // translate端点不存在，说明RWKV服务未正确启动或不支持translate模式
+                            var errorMsg = $"RWKV翻译端点不可用(404 Not Found)，URL: {batchApiUrl}。" +
+                                $"请检查: 1)RWKV推理服务(rwkv_lightning)是否已启动; 2)服务是否支持/translate/v1/batch-translate端点; 3)端口号是否正确";
+                            _logger.LogError(errorMsg);
+                            throw new Exception(errorMsg);
+                        }
+
+                        if (statusCode >= 400 && statusCode < 500)
+                        {
+                            _logger.LogError($"RWKV翻译API请求失败，状态码: {response.StatusCode}({statusCode})，响应内容: {errorContent}");
+                            throw new Exception($"HTTP {statusCode}: {errorContent}");
+                        }
+
+                        if (statusCode >= 500 && attempt < maxRetries - 1)
+                        {
+                            _logger.LogWarning($"RWKV翻译API服务器错误(尝试 {attempt + 1}/{maxRetries})，状态码: {response.StatusCode}，{retryDelayMs}ms后重试");
+                            await Task.Delay(retryDelayMs);
+                            retryDelayMs *= 2;
+                            continue;
+                        }
+
+                        _logger.LogError($"RWKV翻译API请求失败，状态码: {response.StatusCode}({statusCode})，响应内容: {errorContent}");
+                        throw new Exception($"HTTP {statusCode}: {errorContent}");
+                    }
+
                     var responseJson = await response.Content.ReadAsStringAsync();
-                    var responseData = JsonConvert.DeserializeObject<dynamic>(responseJson);
+                    var responseData = JObject.Parse(responseJson);
+                    var translationItems = responseData["translations"] as JArray;
+                    var results = new List<string>(promptTexts.Count);
 
-                    var translationItem = responseData?.translations?[0];
-                    var rawTranslation = string.Empty;
-
-                    if (translationItem != null)
+                    for (int i = 0; i < promptTexts.Count; i++)
                     {
-                        if (translationItem.text != null)
+                        var translationItem = translationItems != null && i < translationItems.Count ? translationItems[i] : null;
+                        var rawTranslation = translationItem?["text"]?.ToString()?.Trim()
+                            ?? translationItem?.ToString()?.Trim()
+                            ?? string.Empty;
+
+                        var translation = FilterOutput(rawTranslation, sourceLang, targetLang);
+                        if (string.IsNullOrWhiteSpace(translation))
                         {
-                            rawTranslation = translationItem.text.ToString()?.Trim() ?? string.Empty;
+                            translation = rawTranslation;
                         }
-                        else
-                        {
-                            rawTranslation = translationItem.ToString()?.Trim() ?? string.Empty;
-                        }
+
+                        results.Add(translation);
                     }
 
-                    var translation = FilterOutput(rawTranslation, sourceLang, targetLang);
-
-                    if (string.IsNullOrWhiteSpace(translation))
+                    if (translationItems == null || translationItems.Count != promptTexts.Count)
                     {
-                        _logger.LogWarning("批量翻译结果为空，返回原始响应");
-                        translation = rawTranslation;
+                        _logger.LogWarning($"RWKV翻译返回数量与请求不一致，请求: {promptTexts.Count}，返回: {translationItems?.Count ?? 0}");
                     }
 
-                    _logger.LogDebug($"RWKV批量翻译成功，结果长度: {translation.Length}");
-                    return translation;
+                    _logger.LogInformation($"RWKV批量翻译成功，批大小: {promptTexts.Count}，URL: {batchApiUrl}");
+                    return results;
                 }
-                else
+                catch (Exception ex) when (attempt < maxRetries - 1 && !ex.Message.Contains("HTTP 4") && !ex.Message.Contains("404"))
                 {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    _logger.LogError($"RWKV批量翻译API请求失败，状态码: {response.StatusCode}，响应内容: {errorContent}");
-                    throw new Exception($"HTTP {response.StatusCode}: {errorContent}");
+                    _logger.LogWarning(ex, $"RWKV批量翻译失败(尝试 {attempt + 1}/{maxRetries})，{retryDelayMs}ms后重试");
+                    await Task.Delay(retryDelayMs);
+                    retryDelayMs *= 2;
                 }
             }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, $"RWKV批量翻译API连接失败: {ex.Message}");
-                throw new Exception($"RWKV批量翻译API连接失败: {ex.Message}", ex);
-            }
-            catch (TaskCanceledException ex)
-            {
-                _logger.LogError(ex, $"RWKV批量翻译API请求超时: {ex.Message}");
-                throw new Exception($"RWKV批量翻译API请求超时: {ex.Message}", ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"RWKV批量翻译API请求异常: {ex.Message}");
-                throw new Exception($"RWKV批量翻译API请求异常: {ex.Message}", ex);
-            }
+
+            throw new Exception($"RWKV批量翻译在 {maxRetries} 次尝试后仍然失败");
         }
 
-        private async Task<string> TranslateWithChatApiAsync(string promptText, string sourceLang, string targetLang)
+        /// <summary>
+        /// 使用llama.cpp续写接口(/v1/completions)做翻译
+        /// 构造翻译prompt，调用续写API获取翻译结果
+        /// </summary>
+        private async Task<IReadOnlyList<string>> TranslateWithCompletionApiAsync(IReadOnlyList<string> promptTexts, string sourceLang, string targetLang)
         {
-            var sourceLangName = GetLanguageName(sourceLang);
-            var targetLangName = GetLanguageName(targetLang);
+            var completionApiUrl = GetBatchApiUrl(); // 已被Normalize为/v1/completions
+            var results = new List<string>();
 
-            var requestData = BuildChatApiRequestData(promptText, sourceLangName, targetLangName);
+            var sourceCode = GetLanguageCode(sourceLang);
+            var targetCode = GetLanguageCode(targetLang);
 
-            var jsonContent = JsonConvert.SerializeObject(requestData);
-            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-            try
+            foreach (var text in promptTexts)
             {
-                var response = await _httpClient.PostAsync(_apiUrl, content);
+                // 构造翻译prompt：使用RWKV-world格式的翻译指令
+                var prompt = $"Translate the following text from {sourceCode} to {targetCode}. Only output the translation, nothing else.\n\n{text}\n\nTranslation:";
 
-                if (response.IsSuccessStatusCode)
+                var requestData = new Dictionary<string, object>
                 {
-                    var responseJson = await response.Content.ReadAsStringAsync();
-                    var responseData = JsonConvert.DeserializeObject<dynamic>(responseJson);
+                    ["prompt"] = prompt,
+                    ["max_tokens"] = 2048,
+                    ["temperature"] = 0.3,
+                    ["top_p"] = 0.95,
+                    ["stream"] = false,
+                    ["stop"] = new[] { "\n\n\n", "User:" }
+                };
 
-                    var rawTranslation = string.Empty;
-                    var choiceItem = responseData?.choices?[0];
+                int maxRetries = 3;
+                int retryDelayMs = 2000;
+                string translation = null;
 
-                    if (choiceItem != null)
-                    {
-                        if (choiceItem.message != null && choiceItem.message.content != null)
-                        {
-                            rawTranslation = choiceItem.message.content.ToString()?.Trim() ?? string.Empty;
-                        }
-                        else if (choiceItem.text != null)
-                        {
-                            rawTranslation = choiceItem.text.ToString()?.Trim() ?? string.Empty;
-                        }
-                        else
-                        {
-                            rawTranslation = choiceItem.ToString()?.Trim() ?? string.Empty;
-                        }
-                    }
-
-                    var translation = FilterOutput(rawTranslation, sourceLang, targetLang);
-
-                    if (string.IsNullOrWhiteSpace(translation))
-                    {
-                        _logger.LogWarning("翻译结果为空，返回原始响应");
-                        translation = rawTranslation;
-                    }
-
-                    _logger.LogDebug($"RWKV翻译成功，结果长度: {translation.Length}");
-                    return translation;
-                }
-                else
+                for (int attempt = 0; attempt < maxRetries; attempt++)
                 {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    _logger.LogError($"RWKVAPI请求失败，状态码: {response.StatusCode}，响应内容: {errorContent}");
-                    throw new Exception($"HTTP {response.StatusCode}: {errorContent}");
+                    try
+                    {
+                        var jsonContent = JsonConvert.SerializeObject(requestData);
+                        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+                        var response = await _httpClient.PostAsync(completionApiUrl, content);
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var errorContent = await response.Content.ReadAsStringAsync();
+                            var statusCode = (int)response.StatusCode;
+
+                            if (statusCode >= 500 && attempt < maxRetries - 1)
+                            {
+                                _logger.LogWarning($"llama.cpp续写API服务器错误(尝试 {attempt + 1}/{maxRetries})，状态码: {response.StatusCode}");
+                                await Task.Delay(retryDelayMs);
+                                retryDelayMs *= 2;
+                                continue;
+                            }
+
+                            throw new Exception($"llama.cpp续写API请求失败 HTTP {statusCode}: {errorContent}");
+                        }
+
+                        var responseJson = await response.Content.ReadAsStringAsync();
+                        var responseData = JObject.Parse(responseJson);
+
+                        // 解析续写响应: {"choices":[{"text":"翻译结果",...}]}
+                        var choice = responseData["choices"]?[0];
+                        var rawText = choice?["text"]?.ToString()?.Trim() ?? string.Empty;
+
+                        translation = FilterOutput(rawText, sourceLang, targetLang);
+                        if (string.IsNullOrWhiteSpace(translation))
+                        {
+                            translation = rawText;
+                        }
+
+                        break; // 成功，退出重试循环
+                    }
+                    catch (Exception ex) when (attempt < maxRetries - 1)
+                    {
+                        _logger.LogWarning(ex, $"llama.cpp续写翻译失败(尝试 {attempt + 1}/{maxRetries})");
+                        await Task.Delay(retryDelayMs);
+                        retryDelayMs *= 2;
+                    }
                 }
+
+                if (translation == null)
+                {
+                    throw new Exception($"llama.cpp续写翻译在 {maxRetries} 次尝试后仍然失败");
+                }
+
+                results.Add(translation);
             }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, $"RWKVAPI连接失败: {ex.Message}");
-                throw new Exception($"RWKVAPI连接失败: {ex.Message}", ex);
-            }
-            catch (TaskCanceledException ex)
-            {
-                _logger.LogError(ex, $"RWKVAPI请求超时: {ex.Message}");
-                throw new Exception($"RWKVAPI请求超时: {ex.Message}", ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"RWKVAPI请求异常: {ex.Message}");
-                throw new Exception($"RWKVAPI请求异常: {ex.Message}", ex);
-            }
+
+            _logger.LogInformation($"llama.cpp续写翻译成功，批大小: {promptTexts.Count}，URL: {completionApiUrl}");
+            return results;
         }
 
-        private object BuildChatApiRequestData(string promptText, string sourceLangName, string targetLangName)
+        private async Task<string> TranslateWithBatchApiAsync(string promptText, string sourceLang, string targetLang)
         {
-            // 根据不同的API版本调整请求格式
-            var isV1OrLater = (_apiUrl?.Contains("/v1/") ?? false) || (_apiUrl?.Contains("/v2/") ?? false) || (_apiUrl?.Contains("/v3/") ?? false);
-            var isLocalhost = (_apiUrl?.ToLowerInvariant().StartsWith("http://localhost:") ?? false) || (_apiUrl?.ToLowerInvariant().StartsWith("http://127.0.0.1:") ?? false);
-            
-            if (isV1OrLater || isLocalhost)
-            {
-                // V1/V2/V3 API格式（RWKV专用格式）或本地模型
-                var baseRequest = new Dictionary<string, object>
-                {
-                    ["contents"] = new[] { promptText },
-                    ["max_tokens"] = 1024,
-                    ["temperature"] = 1.0,
-                    ["stream"] = false,
-                    // 添加必要的字段以匹配RWKV API格式
-                    ["stop_tokens"] = new[] { 0, 261, 24281 }
-                };
-
-                // 添加password字段（RWKV API需要）
-                if (!string.IsNullOrEmpty(_apiKey))
-                {
-                    baseRequest["password"] = _apiKey;
-                }
-
-                // 为本地模型添加额外的必要字段
-                if (isLocalhost)
-                {
-                    baseRequest["top_k"] = 1;
-                    baseRequest["top_p"] = 0.3;
-                }
-
-                return baseRequest;
-            }
-            else
-            {
-                // 旧版API格式
-                var baseRequest = new Dictionary<string, object>
-                {
-                    ["contents"] = new[] { promptText },
-                    ["max_tokens"] = 1024,
-                    ["temperature"] = 1.0,
-                    ["stream"] = false,
-                    ["stop_tokens"] = new[] { 0, 261, 24281 }
-                };
-
-                if (!string.IsNullOrEmpty(_apiKey))
-                {
-                    baseRequest["password"] = _apiKey;
-                }
-
-                return baseRequest;
-            }
+            var results = await TranslateWithBatchApiAsync(new[] { promptText }, sourceLang, targetLang);
+            return results.FirstOrDefault() ?? string.Empty;
         }
 
         public override async Task<string> ChatAsync(string question, string context = null)
@@ -672,20 +631,16 @@ namespace DocumentTranslator.Services.Translation.Translators
                     ["max_tokens"] = 2048,
                     ["temperature"] = 0.8,
                     ["stream"] = false,
-                    ["stop_tokens"] = new[] { 0, 261, 24281 }
+                    ["top_k"] = 1,
+                    ["top_p"] = 0.0,
+                    ["alpha_presence"] = 0.0,
+                    ["alpha_frequency"] = 0.0,
+                    ["stop_tokens"] = new[] { 0 }
                 };
 
                 if (!string.IsNullOrEmpty(_apiKey))
                 {
                     requestData["password"] = _apiKey;
-                }
-
-                // 为本地模型添加额外的必要字段
-                var isLocalhost = (_apiUrl?.ToLowerInvariant().StartsWith("http://localhost:") ?? false) || (_apiUrl?.ToLowerInvariant().StartsWith("http://127.0.0.1:") ?? false);
-                if (isLocalhost)
-                {
-                    requestData["top_k"] = 1;
-                    requestData["top_p"] = 0.3;
                 }
 
                 var jsonContent = JsonConvert.SerializeObject(requestData);
@@ -766,8 +721,28 @@ namespace DocumentTranslator.Services.Translation.Translators
 
             try
             {
-                object testData;
                 var isLocalhost = (_apiUrl?.ToLowerInvariant().StartsWith("http://localhost:") ?? false) || (_apiUrl?.ToLowerInvariant().StartsWith("http://127.0.0.1:") ?? false);
+
+                if (isLocalhost)
+                {
+                    var baseUrl = _apiUrl.Substring(0, _apiUrl.IndexOf("/", 8));
+                    try
+                    {
+                        using var modelsCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                        var modelsResponse = await _httpClient.GetAsync($"{baseUrl}/v1/models", modelsCts.Token);
+                        if (modelsResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation($"RWKVAPI连接测试成功（/v1/models），使用URL: {_apiUrl}");
+                            return true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug($"轻量连接测试失败，尝试完整测试: {ex.Message}");
+                    }
+                }
+
+                object testData;
 
                 if (_useBatchTranslate)
                 {
@@ -780,38 +755,18 @@ namespace DocumentTranslator.Services.Translation.Translators
                 }
                 else
                 {
-                    var isV1OrLater = (_apiUrl?.Contains("/v1/") ?? false) || (_apiUrl?.Contains("/v2/") ?? false) || (_apiUrl?.Contains("/v3/") ?? false);
-
-                    if (isV1OrLater || isLocalhost)
+                    testData = new Dictionary<string, object>
                     {
-                        testData = new Dictionary<string, object>
-                        {
-                            ["contents"] = new[] { "你好" },
-                            ["max_tokens"] = 10,
-                            ["temperature"] = 1.0,
-                            ["stream"] = false,
-                            ["stop_tokens"] = new[] { 0, 261, 24281 }
-                        };
-
-                        // 为本地模型添加额外的必要字段
-                        if (isLocalhost)
-                        {
-                            var dict = (Dictionary<string, object>)testData;
-                            dict["top_k"] = 1;
-                            dict["top_p"] = 0.3;
-                        }
-                    }
-                    else
-                    {
-                        testData = new Dictionary<string, object>
-                        {
-                            ["contents"] = new[] { "你好" },
-                            ["max_tokens"] = 10,
-                            ["temperature"] = 1.0,
-                            ["stream"] = false,
-                            ["stop_tokens"] = new[] { 0, 261, 24281 }
-                        };
-                    }
+                        ["contents"] = new[] { "你好" },
+                        ["max_tokens"] = 10,
+                        ["temperature"] = 1.0,
+                        ["stream"] = false,
+                        ["top_k"] = 1,
+                        ["top_p"] = 0.0,
+                        ["alpha_presence"] = 0.0,
+                        ["alpha_frequency"] = 0.0,
+                        ["stop_tokens"] = new[] { 0 }
+                    };
 
                     if (!string.IsNullOrEmpty(_apiKey))
                     {
@@ -823,7 +778,6 @@ namespace DocumentTranslator.Services.Translation.Translators
                 var jsonContent = JsonConvert.SerializeObject(testData);
                 var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                // 为本地连接增加超时时间
                 var timeoutSeconds = isLocalhost ? 15 : 5;
                 using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
                 var response = await _httpClient.PostAsync(_apiUrl, content, cts.Token);

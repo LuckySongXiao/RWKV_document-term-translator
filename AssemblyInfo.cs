@@ -1,12 +1,12 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("RWKV_术语文档翻译助手")]
-[assembly: AssemblyDescription("支持Word、PDF、Excel、PowerPoint、TXT等多种格式的智能文档翻译工具")]
+[assembly: AssemblyTitle("RWKV文档术语翻译助手")]
+[assembly: AssemblyDescription("支持Word、Excel等多种格式的智能文档翻译工具")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("糖醋鹦鹉")]
-[assembly: AssemblyProduct("RWKV_术语文档翻译助手")]
-[assembly: AssemblyCopyright("糖醋鹦鹉 © 2026")]
+[assembly: AssemblyCompany("个人开发者")]
+[assembly: AssemblyProduct("RWKV文档术语翻译助手")]
+[assembly: AssemblyCopyright("LuckySongXiao © 2024")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]

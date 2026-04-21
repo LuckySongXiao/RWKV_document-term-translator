@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using DocumentTranslator.Services.Translation;
 using DocumentTranslator.Services.Logging;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Windows
 {
@@ -39,7 +40,7 @@ namespace DocumentTranslator.Windows
             _logger = serviceProvider.GetRequiredService<ILogger<EngineConfigWindow>>();
 
             _httpClient = new HttpClient();
-            _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config");
+            _configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config");
 
             LoadAllConfigs();
         }
@@ -118,10 +119,9 @@ namespace DocumentTranslator.Windows
 
                 var defaultUrls = new List<string>
                 {
-                    "http://locahost:8000/translate/v1/batch-translate",
-                    "http://locahost:8000/v1/chat/completions",
-                    "http://locahost:8000/v2/chat/completions",
-                    "http://locahost:8000/v3/chat/completions"
+                    "http://localhost:8000/translate/v1/batch-translate",
+                    "http://localhost:8000/v1/chat/completions",
+                    "http://localhost:8000/v2/chat/completions"
                 };
 
                 var configFile = Path.Combine(_configPath, "rwkv_api.json");
@@ -214,10 +214,9 @@ namespace DocumentTranslator.Windows
 
                 List<string> availableUrls = new List<string>
                 {
-                    "http://locahost:8000/translate/v1/batch-translate",
-                    "http://locahost:8000/v1/chat/completions",
-                    "http://locahost:8000/v2/chat/completions",
-                    "http://locahost:8000/v3/chat/completions"
+                    "http://localhost:8000/translate/v1/batch-translate",
+                    "http://localhost:8000/v1/chat/completions",
+                    "http://localhost:8000/v2/chat/completions"
                 };
 
                 var configFile = Path.Combine(_configPath, "rwkv_api.json");

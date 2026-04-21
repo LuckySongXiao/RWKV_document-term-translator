@@ -9,6 +9,8 @@ using System.Threading;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using DocumentTranslator.Services.Translation.Translators;
+using DocumentTranslator.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace DocumentTranslator.Services.Translation
@@ -30,8 +32,8 @@ namespace DocumentTranslator.Services.Translation
         private string _outputFormat = "bilingual"; // 输出格式：bilingual（双语对照）或 translation_only（仅翻译结果）
         private bool _useModelForLanguageDetection = true; // 使用模型进行语言检测
         private Action<double, string> _progressCallback;
-        private int _retryCount = 1;
-        private int _retryDelay = 1000; // 毫秒
+        private int _retryCount = 3;
+        private int _retryDelay = 2000;
         private DateTime _lastProgressUpdate = DateTime.MinValue;
         private const double _minProgressUpdateInterval = 100; // 最小进度更新间隔100ms
 
@@ -104,7 +106,7 @@ namespace DocumentTranslator.Services.Translation
             }
 
             // 在程序根目录下创建输出目录
-            var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+            var outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
@@ -226,72 +228,65 @@ namespace DocumentTranslator.Services.Translation
             var tasks = new List<Task>();
             int finished = 0;
 
-            // 根据当前翻译器类型确定并发限制
             var currentTranslatorType = _translationService.CurrentTranslatorType?.ToLowerInvariant() ?? "rwkv";
-            int maxConcurrency = currentTranslatorType switch
-            {
-                "rwkv" => Translators.RWKVTranslator.MaxConcurrency,
-                "ollama" => 30,
-                "zhipuai" or "siliconflow" or "tencent" => 2,
-                _ => 5
-            };
+            int maxConcurrency = Math.Max(1, _translationService.GetEffectiveMaxParallelism());
 
             _logger.LogInformation($"当前翻译器: {currentTranslatorType}, 并发限制: {maxConcurrency}");
+            var rwkvTranslator = _translationService.CurrentTranslator as RWKVTranslator;
 
-            var semaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency);
-
-            for (int i = 0; i < totalParagraphs; i++)
+            if (rwkvTranslator != null)
             {
-                var index = i;
-                var para = paragraphs[index];
-                tasks.Add(Task.Run(async () =>
+                await ExecuteRwkvParagraphTranslationBatchesAsync(paragraphs, paragraphTranslations, terminology, preprocessedDict, csvWriter, csvLock, totalParagraphs, maxConcurrency, rwkvTranslator);
+            }
+            else
+            {
+                var semaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+
+                for (int i = 0; i < totalParagraphs; i++)
                 {
-                    await semaphore.WaitAsync();
-                    try
+                    var index = i;
+                    var para = paragraphs[index];
+                    tasks.Add(Task.Run(async () =>
                     {
-                        // 使用预处理的文本
-                        var textToTranslate = paragraphOriginals[index];
-                        if (preprocessedDict != null && preprocessedDict.ContainsKey(index))
+                        await semaphore.WaitAsync();
+                        try
                         {
-                            textToTranslate = preprocessedDict[index];
-                        }
-
-                        var (translated, original, preprocessed) = await ComputeParagraphTranslationAsync(para, terminology, textToTranslate);
-                        paragraphTranslations[index] = translated;
-
-                        // 记录到CSV
-                        if (!string.IsNullOrWhiteSpace(original))
-                        {
-                            lock (csvLock)
+                            var textToTranslate = paragraphOriginals[index];
+                            if (preprocessedDict != null && preprocessedDict.ContainsKey(index))
                             {
-                                string esc(string s)
+                                textToTranslate = preprocessedDict[index];
+                            }
+
+                            var (translated, original, preprocessed) = await ComputeParagraphTranslationAsync(para, terminology, textToTranslate);
+                            paragraphTranslations[index] = translated;
+
+                            if (!string.IsNullOrWhiteSpace(original))
+                            {
+                                lock (csvLock)
                                 {
-                                    if (s == null) return "";
-                                    s = s.Replace("\r\n", "\n").Replace("\r", "\n");
-                                    if (s.Contains('"') || s.Contains(',') || s.Contains('\n'))
-                                        return "\"" + s.Replace("\"", "\"\"") + "\"";
-                                    return s;
+                                    string loc = $"段落_{index + 1}";
+                                    csvWriter.WriteLineAsync($"{loc},{EscapeCsv(original)},{EscapeCsv(preprocessed)},{EscapeCsv(translated)}").GetAwaiter().GetResult();
                                 }
-                                string loc = $"段落_{index + 1}";
-                                csvWriter.WriteLineAsync($"{loc},{esc(original)},{esc(preprocessed)},{esc(translated)}").GetAwaiter().GetResult();
                             }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, $"并发翻译段落失败，索引 {index}，将跳过写回");
-                    }
-                    finally
-                    {
-                        semaphore.Release();
-                        var done = Interlocked.Increment(ref finished);
-                        var progress = 0.1 + (0.7 * done / Math.Max(1, totalParagraphs));
-                        UpdateProgress(progress, $"正在并发翻译段落 {done}/{totalParagraphs}");
-                    }
-                }));
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, $"并发翻译段落失败，索引 {index}，将跳过写回");
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                            var done = Interlocked.Increment(ref finished);
+                            var progress = 0.1 + (0.7 * done / Math.Max(1, totalParagraphs));
+                            UpdateProgress(progress, $"正在并发翻译段落 {done}/{totalParagraphs}");
+                        }
+                    }));
+                }
+                await Task.WhenAll(tasks);
+                semaphore.Dispose();
             }
-            await Task.WhenAll(tasks);
-            semaphore.Dispose();
+
+            UpdateProgress(0.8, $"段落翻译完成，准备写回 {totalParagraphs} 个段落");
 
             // 顺序写回阶段：避免OpenXML并发写入
             for (int i = 0; i < totalParagraphs; i++)
@@ -377,58 +372,163 @@ namespace DocumentTranslator.Services.Translation
             document.MainDocumentPart.Document.Save();
         }
 
-        // 仅执行预处理与网络翻译，返回译文；不写回段落
-        private async Task<(string translated, string original, string preprocessed)> ComputeParagraphTranslationAsync(Paragraph paragraph, Dictionary<string, string> terminology, string preprocessedText = null)
+        private async Task ExecuteRwkvParagraphTranslationBatchesAsync(
+            List<Paragraph> paragraphs,
+            string[] paragraphTranslations,
+            Dictionary<string, string> terminology,
+            Dictionary<int, string> preprocessedDict,
+            StreamWriter csvWriter,
+            object csvLock,
+            int totalParagraphs,
+            int maxConcurrency,
+            RWKVTranslator rwkvTranslator)
         {
-            // 段落若位于表格内，交由表格逻辑处理，避免重复翻译并确保跳过规则生效
-            if (paragraph.Ancestors<Table>().Any()) return (string.Empty, string.Empty, string.Empty);
+            var jobs = new List<(int index, string original, string preprocessed, string toTranslate, Dictionary<string, string> terms, Dictionary<string, string> placeholders)>();
+
+            for (int i = 0; i < paragraphs.Count; i++)
+            {
+                var job = PrepareParagraphTranslationJob(paragraphs[i], terminology, preprocessedDict != null && preprocessedDict.TryGetValue(i, out var preprocessedText) ? preprocessedText : null);
+                if (!string.IsNullOrWhiteSpace(job.original))
+                {
+                    jobs.Add((i, job.original, job.preprocessed, job.toTranslate, job.terms, job.placeholders));
+                }
+            }
+
+            if (jobs.Count == 0)
+            {
+                return;
+            }
+
+            int batchSize = GetRwkvBatchSize(maxConcurrency);
+            int finished = 0;
+            int totalBatches = (jobs.Count + batchSize - 1) / batchSize;
+            _logger.LogInformation($"RWKV段落翻译切换为真实批量模式，批大小: {batchSize}，任务数: {jobs.Count}，批次数: {totalBatches}，并发限制: {maxConcurrency}");
+
+            // 构建所有批次
+            var batches = new List<List<(int index, string original, string preprocessed, string toTranslate, Dictionary<string, string> terms, Dictionary<string, string> placeholders)>>();
+            for (int offset = 0; offset < jobs.Count; offset += batchSize)
+            {
+                batches.Add(jobs.Skip(offset).Take(batchSize).ToList());
+            }
+
+            // 并行执行所有批次，信号量由 TranslateBatchAsync 内部控制并发
+            var batchTasks = batches.Select(async (batch, batchIndex) =>
+            {
+                IReadOnlyList<string> batchResults = null;
+
+                try
+                {
+                    batchResults = await rwkvTranslator.TranslateBatchAsync(batch.Select(x => x.toTranslate).ToList(), _sourceLang, _targetLang);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, $"RWKV真实批量翻译失败，将回退到逐段翻译，批次: {batchIndex + 1}/{totalBatches}，批大小: {batch.Count}");
+                }
+
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    var job = batch[i];
+                    string translatedText = batchResults != null && i < batchResults.Count
+                        ? batchResults[i]
+                        : await TranslateTextWithRetryAsync(job.toTranslate, job.terms, job.original);
+
+                    if (!string.IsNullOrWhiteSpace(translatedText))
+                    {
+                        paragraphTranslations[job.index] = RestoreMathFormulas(translatedText, job.placeholders);
+                    }
+
+                    lock (csvLock)
+                    {
+                        string loc = $"段落_{job.index + 1}";
+                        csvWriter.WriteLineAsync($"{loc},{EscapeCsv(job.original)},{EscapeCsv(job.preprocessed)},{EscapeCsv(paragraphTranslations[job.index])}").GetAwaiter().GetResult();
+                    }
+
+                    int currentFinished = Interlocked.Increment(ref finished);
+                    var progress = 0.1 + (0.7 * currentFinished / Math.Max(1, totalParagraphs));
+                    UpdateProgress(progress, $"正在真实批量翻译段落 {currentFinished}/{totalParagraphs}");
+                }
+            }).ToArray();
+
+            await Task.WhenAll(batchTasks);
+        }
+
+        private (string original, string preprocessed, string toTranslate, Dictionary<string, string> terms, Dictionary<string, string> placeholders) PrepareParagraphTranslationJob(
+            Paragraph paragraph,
+            Dictionary<string, string> terminology,
+            string preprocessedText = null)
+        {
+            if (paragraph.Ancestors<Table>().Any()) return (string.Empty, string.Empty, string.Empty, null, null);
 
             var runs = paragraph.Descendants<Run>().ToList();
-            if (!runs.Any()) return (string.Empty, string.Empty, string.Empty);
+            if (!runs.Any()) return (string.Empty, string.Empty, string.Empty, null, null);
 
             var paragraphText = GetParagraphText(paragraph);
-            if (string.IsNullOrWhiteSpace(paragraphText)) return (string.Empty, string.Empty, string.Empty);
+            if (string.IsNullOrWhiteSpace(paragraphText)) return (string.Empty, string.Empty, string.Empty, null, null);
 
-            // 保护数学公式
             var (protectedText, mathPlaceholders) = ProtectMathFormulas(paragraphText);
-
-            // 术语预替换（与原有逻辑一致）
             string toTranslate = protectedText;
+            string preprocessed = protectedText;
             Dictionary<string, string> termsForTranslator = terminology;
-            
-            // 如果提供了预处理的文本（外译中批量预处理），直接使用
+
             if (!string.IsNullOrWhiteSpace(preprocessedText))
             {
                 toTranslate = preprocessedText;
+                preprocessed = preprocessedText;
                 termsForTranslator = null;
             }
             else if (_useTerminology && _preprocessTerms && terminology != null && terminology.Count > 0)
             {
-                // 规范方向：键始终“源语言术语”
                 Dictionary<string, string> termsToUse = terminology;
                 if (!_isCnToForeign)
                 {
                     var reversed = new Dictionary<string, string>(StringComparer.Ordinal);
                     foreach (var kv in terminology)
                     {
-                        var src = kv.Value; var dst = kv.Key;
+                        var src = kv.Value;
+                        var dst = kv.Key;
                         if (string.IsNullOrWhiteSpace(src)) continue;
                         if (!reversed.ContainsKey(src)) reversed[src] = dst;
                     }
                     termsToUse = reversed;
                 }
 
-                // 替换后不给翻译器传术语表，避免二次干预
                 toTranslate = _termExtractor.ReplaceTermsInText(protectedText, termsToUse, _isCnToForeign);
+                preprocessed = toTranslate;
                 termsForTranslator = null;
             }
 
-            var translatedText = await TranslateTextWithRetryAsync(toTranslate, termsForTranslator, paragraphText);
-            if (string.IsNullOrEmpty(translatedText)) return (string.Empty, paragraphText, toTranslate);
+            return (paragraphText, preprocessed, toTranslate, termsForTranslator, mathPlaceholders);
+        }
+
+        private int GetRwkvBatchSize(int maxConcurrency)
+        {
+            // 单批次大小等于并发数，与并发测试时一致
+            // batch-translate API 一次请求发送 maxConcurrency 个段落
+            // GPU 显存占用与并发测试相同，充分利用 GPU 并行能力
+            return Math.Max(1, maxConcurrency);
+        }
+
+        private string EscapeCsv(string s)
+        {
+            if (s == null) return "";
+            s = s.Replace("\r\n", "\n").Replace("\r", "\n");
+            if (s.Contains('"') || s.Contains(',') || s.Contains('\n'))
+                return "\"" + s.Replace("\"", "\"\"") + "\"";
+            return s;
+        }
+
+        // 仅执行预处理与网络翻译，返回译文；不写回段落
+        private async Task<(string translated, string original, string preprocessed)> ComputeParagraphTranslationAsync(Paragraph paragraph, Dictionary<string, string> terminology, string preprocessedText = null)
+        {
+            var job = PrepareParagraphTranslationJob(paragraph, terminology, preprocessedText);
+            if (string.IsNullOrWhiteSpace(job.original)) return (string.Empty, string.Empty, string.Empty);
+
+            var translatedText = await TranslateTextWithRetryAsync(job.toTranslate, job.terms, job.original);
+            if (string.IsNullOrEmpty(translatedText)) return (string.Empty, job.original, job.preprocessed);
 
             // 恢复数学公式
-            translatedText = RestoreMathFormulas(translatedText, mathPlaceholders);
-            return (translatedText, paragraphText, toTranslate);
+            translatedText = RestoreMathFormulas(translatedText, job.placeholders);
+            return (translatedText, job.original, job.preprocessed);
         }
 
         /// <summary>
@@ -605,8 +705,15 @@ namespace DocumentTranslator.Services.Translation
         {
             if (jobs.Count == 0) return;
 
+            var rwkvTranslator = _translationService.CurrentTranslator as RWKVTranslator;
+            if (rwkvTranslator != null)
+            {
+                await ExecuteRwkvTableTranslationJobsAsync(jobs, csvWriter, csvLock, rwkvTranslator);
+                return;
+            }
+
             // 并发执行翻译
-            int maxConcurrency = _translationService.GetSuggestedMaxParallelism();
+            int maxConcurrency = Math.Max(1, _translationService.GetEffectiveMaxParallelism());
             using var semaphore = new SemaphoreSlim(maxConcurrency);
             var tasks = new List<Task<(Paragraph p, string original, string translated, Dictionary<string, string> placeholders)>>();
             int finished = 0;
@@ -665,6 +772,70 @@ namespace DocumentTranslator.Services.Translation
                     }
                 }
             }
+        }
+
+        private async Task ExecuteRwkvTableTranslationJobsAsync(
+            List<(Paragraph p, string original, string toTranslate, Dictionary<string, string> terms, Dictionary<string, string> placeholders)> jobs,
+            StreamWriter csvWriter,
+            object csvLock,
+            RWKVTranslator rwkvTranslator)
+        {
+            int batchSize = GetRwkvBatchSize(Math.Max(1, _translationService.GetEffectiveMaxParallelism()));
+            int finished = 0;
+            int total = jobs.Count;
+            int totalBatches = (jobs.Count + batchSize - 1) / batchSize;
+
+            _logger.LogInformation($"RWKV表格翻译切换为真实批量模式，批大小: {batchSize}，任务数: {total}，批次数: {totalBatches}");
+
+            // 构建所有批次
+            var batches = new List<List<(Paragraph p, string original, string toTranslate, Dictionary<string, string> terms, Dictionary<string, string> placeholders)>>();
+            for (int offset = 0; offset < jobs.Count; offset += batchSize)
+            {
+                batches.Add(jobs.Skip(offset).Take(batchSize).ToList());
+            }
+
+            // 并行执行所有批次，信号量由 TranslateBatchAsync 内部控制并发
+            var batchTasks = batches.Select(async (batch, batchIndex) =>
+            {
+                IReadOnlyList<string> batchResults = null;
+
+                try
+                {
+                    batchResults = await rwkvTranslator.TranslateBatchAsync(batch.Select(x => x.toTranslate).ToList(), _sourceLang, _targetLang);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, $"RWKV表格真实批量翻译失败，将回退到逐段翻译，批次: {batchIndex + 1}/{totalBatches}，批大小: {batch.Count}");
+                }
+
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    var job = batch[i];
+                    var translatedText = batchResults != null && i < batchResults.Count
+                        ? batchResults[i]
+                        : await TranslateTextWithRetryAsync(job.toTranslate, job.terms, job.original);
+
+                    if (!string.IsNullOrWhiteSpace(translatedText))
+                    {
+                        translatedText = RestoreMathFormulas(translatedText, job.placeholders);
+                        UpdateParagraphText(job.p, job.original, translatedText);
+                    }
+
+                    if (csvWriter != null)
+                    {
+                        lock (csvLock)
+                        {
+                            csvWriter.WriteLineAsync($"表格,{EscapeCsv(job.original)},{EscapeCsv(job.toTranslate)},{EscapeCsv(translatedText)}").GetAwaiter().GetResult();
+                        }
+                    }
+
+                    int currentFinished = Interlocked.Increment(ref finished);
+                    var progress = 0.9 + (0.1 * currentFinished / Math.Max(1, total));
+                    UpdateProgress(progress, $"正在真实批量翻译表格内容 {currentFinished}/{total}");
+                }
+            }).ToArray();
+
+            await Task.WhenAll(batchTasks);
         }
 
         /// <summary>

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using DocumentTranslator.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace DocumentTranslator.Services.Translation
@@ -29,7 +30,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var terminologyPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
+                var terminologyPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
                 if (File.Exists(terminologyPath))
                 {
                     var jsonContent = File.ReadAllText(terminologyPath);
@@ -422,7 +423,7 @@ namespace DocumentTranslator.Services.Translation
             try
             {
                 var normalized = NormalizeLanguageKey(sourceLanguage);
-                var reverseDataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
+                var reverseDataDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
                 var reverseFilePath = Path.Combine(reverseDataDir, $"terminology_{normalized}.json");
 
                 if (!File.Exists(reverseFilePath))
@@ -736,7 +737,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var terminologyPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
+                var terminologyPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
                 var directory = Path.GetDirectoryName(terminologyPath);
 
                 if (!Directory.Exists(directory))

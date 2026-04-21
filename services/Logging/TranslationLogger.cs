@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Microsoft.Extensions.Logging;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Services.Logging
 {
@@ -16,7 +17,8 @@ namespace DocumentTranslator.Services.Logging
         public TranslationLogger(string categoryName)
         {
             _categoryName = categoryName;
-            _logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "translation_app.log");
+            var baseDir = PathHelper.GetSafeBaseDirectory();
+            _logFilePath = Path.Combine(baseDir, "translation_app.log");
         }
 
         public IDisposable BeginScope<TState>(TState state) => null;

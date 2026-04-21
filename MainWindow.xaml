@@ -1,11 +1,10 @@
 <Window x:Class="DocumentTranslator.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="RWKV_术语翻译助手 v3.1"
+        Title="RWKV文档术语翻译助手 v3.1"
         Height="800" Width="1200"
         MinHeight="600" MinWidth="900"
-        WindowStartupLocation="CenterScreen"
-        Icon="logo.ico">
+        WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
         <!-- 样式定义 -->
@@ -113,6 +112,120 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- 本地模型管理卡片 -->
+                    <Border Style="{StaticResource CardStyle}" Background="#E3F2FD">
+                        <StackPanel>
+                            <TextBlock Text="🎮 本地模型管理" Style="{StaticResource HeaderStyle}" Foreground="#1565C0"/>
+                            
+                            <!-- 服务状态 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,5">
+                                <TextBlock Text="状态: " FontWeight="Bold" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LocalServiceStatusText" Text="⏹️ 已停止" VerticalAlignment="Center" Foreground="#666666"/>
+                            </StackPanel>
+
+                            <!-- GPU选择 -->
+                            <TextBlock Text="🖥️ 选择GPU" FontWeight="Bold" Margin="0,8,0,3"/>
+                            <ComboBox x:Name="GpuSelectorCombo" Height="25" Margin="0,2">
+                                <ComboBoxItem Content="正在检测GPU..."/>
+                            </ComboBox>
+
+                            <!-- 模型选择 -->
+                            <TextBlock Text="📦 选择模型" FontWeight="Bold" Margin="0,8,0,3"/>
+                            <ComboBox x:Name="ModelSelectorCombo" Height="25" Margin="0,2">
+                                <ComboBoxItem Content="正在扫描模型..."/>
+                            </ComboBox>
+
+                            <!-- 推理工具选择 -->
+                            <TextBlock Text="🔧 推理工具" FontWeight="Bold" Margin="0,8,0,3"/>
+                            <ComboBox x:Name="InferenceToolCombo" Height="25" Margin="0,2" SelectedIndex="0" SelectionChanged="InferenceToolCombo_SelectionChanged">
+                                <ComboBoxItem Content="rwkv_lightning.exe (推荐 - 完整翻译API服务)"/>
+                                <ComboBoxItem Content="benchmark.exe (性能测试 - 不提供翻译API)"/>
+                                <ComboBoxItem Content="llama-server.exe [CUDA] (GGUF模型 - NVIDIA GPU)"/>
+                                <ComboBoxItem Content="llama-server.exe [SYCL] (GGUF模型 - Intel GPU)"/>
+                                <ComboBoxItem Content="llama-server.exe [Vulkan] (GGUF模型 - AMD/通用GPU)"/>
+                                <ComboBoxItem Content="llama-server.exe [CPU] (GGUF模型 - 纯CPU推理)"/>
+                            </ComboBox>
+                            <TextBlock x:Name="InferenceToolDescription" Text="💡 rwkv_lightning.exe 提供完整的翻译API服务；llama-server.exe 使用GGUF格式模型" FontSize="10" Foreground="Gray" Margin="0,4,0,0" TextWrapping="Wrap"/>
+
+                            <!-- ModelScope下载地址 -->
+                            <TextBlock Text="🌐 ModelScope下载地址" FontWeight="Bold" Margin="0,8,0,3"/>
+                            <TextBox x:Name="ModelScopeUrlText" Height="25" Margin="0,2" 
+                                     Text="https://www.modelscope.cn/models/AlicLi/rwkv7-g1-libtorch-st/files"
+                                     ToolTip="可修改为其他ModelScope模型仓库地址，格式: https://www.modelscope.cn/models/{Owner}/{ModelName}/files"/>
+                            <TextBlock x:Name="ModelScopeUrlHint" Text="💡 可修改为其他ModelScope模型仓库地址" 
+                                       FontSize="10" Foreground="Gray" Margin="0,2,0,0" TextWrapping="Wrap"/>
+
+                            <!-- 模型下载按钮 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="DownloadModelBtn" Content="📥 从ModelScope下载模型" 
+                                        Click="DownloadModelFromSite" Width="180" Height="28"
+                                        Background="#FF9800" Foreground="White" FontWeight="Bold"/>
+                                <Button x:Name="CancelDownloadBtn" Content="❌ 取消" 
+                                        Click="CancelModelDownload" Width="70" Height="28"
+                                        Background="#9E9E9E" Foreground="White" IsEnabled="False" Margin="8,0,0,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="ImportLocalModelBtn" Content="📂 导入本地模型" 
+                                        Click="ImportLocalModel" Width="120" Height="28"
+                                        Background="#03A9F4" Foreground="White" FontWeight="Bold"/>
+                                <Button x:Name="ConvertSelectedModelBtn" Content="🔄 转换选中.pth" 
+                                        Click="ConvertSelectedPthModel" Width="120" Height="28"
+                                        Background="#9C27B0" Foreground="White" FontWeight="Bold" Margin="8,0,0,0"/>
+                            </StackPanel>
+
+                            <!-- 下载进度条 -->
+                            <ProgressBar x:Name="ModelDownloadProgress" Height="16" Margin="0,6,0,0" 
+                                         Visibility="Collapsed" Background="#E0E0E0"/>
+                            <TextBlock x:Name="DownloadProgressText" Text="" FontSize="10" 
+                                       Foreground="#1565C0" Margin="0,2,0,0" TextWrapping="Wrap"
+                                       Visibility="Collapsed"/>
+
+                            <!-- 并发数显示 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,3">
+                                <TextBlock Text="⚡ 建议并发: " FontWeight="Bold" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="SuggestedConcurrencyText" Text="-" VerticalAlignment="Center" Foreground="#2196F3"/>
+                            </StackPanel>
+
+                            <!-- BSZ 上限测试选项 -->
+                            <CheckBox x:Name="EnableBszTestCheck" Content="🧪 启动后自动执行 BSZ 上限测试" 
+                                      Margin="0,8,0,3" FontSize="12"/>
+                            <TextBlock Text="勾选后将在启动模型后自动测试短/中/长 prompt 场景的极限 BSN" 
+                                       FontSize="10" Foreground="Gray" Margin="0,0,0,8" TextWrapping="Wrap"/>
+
+                            <!-- BSZ 测试增量值 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                                <TextBlock Text="📈 BSZ 测试增量: " FontWeight="Bold" VerticalAlignment="Center" Width="100"/>
+                                <TextBox x:Name="BszIncrementText" Text="10" Width="60" Height="25" 
+                                         TextAlignment="Center" VerticalContentAlignment="Center"
+                                         PreviewTextInput="BszIncrementText_PreviewTextInput"/>
+                                <TextBlock Text=" (每次递增的 batch size 数量)" FontSize="10" 
+                                           Foreground="Gray" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            </StackPanel>
+
+                            <!-- 控制按钮 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                <Button x:Name="StartLocalModelBtn" Content="🚀 启动本地模型" 
+                                        Click="StartLocalModel" Width="130" Height="32" 
+                                        Background="#4CAF50" Foreground="White" FontWeight="Bold" Margin="0,0,8,0"/>
+                                <Button x:Name="StopLocalModelBtn" Content="⏹️ 停止" 
+                                        Click="StopLocalModel" Width="80" Height="32" 
+                                        Background="#f44336" Foreground="White" IsEnabled="False" Margin="0,0,8,0"/>
+                                <Button x:Name="RefreshModelsBtn" Content="🔄 刷新" 
+                                        Click="RefreshLocalModels" Width="60" Height="32"/>
+                            </StackPanel>
+
+                            <!-- 资源监控 -->
+                            <Border Background="#BBDEFB" CornerRadius="4" Padding="8" Margin="0,10,0,0">
+                                <StackPanel>
+                                    <TextBlock x:Name="LocalModelInfoText" Text="💡 启动后自动计算最优并发数" 
+                                               FontSize="11" Foreground="#1565C0" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="GpuMemoryText" Text="" 
+                                               FontSize="11" Foreground="#1565C0" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
                     <!-- AI翻译引擎卡片 -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
@@ -175,7 +288,16 @@
                                     <Button Content="💾 应用并发设置" Click="ApplyParallelism" Width="120"/>
                                 </StackPanel>
 
-                                <TextBlock Text="💡 并发设置只对RWKV引擎有效，控制同一秒内提交的最大不同文本内容数。" FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                <TextBlock Text="📦 每批次并发上限" FontWeight="Bold" Margin="0,10,0,3"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                                    <TextBox x:Name="BatchConcurrencyLimitText" Text="50" Width="60" Height="25" 
+                                             TextAlignment="Center" VerticalContentAlignment="Center"
+                                             PreviewTextInput="BszIncrementText_PreviewTextInput"/>
+                                    <TextBlock Text=" GPU资源超警戒时每批最大并发数（0=不限）" FontSize="10" 
+                                               Foreground="Gray" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                                </StackPanel>
+
+                                <TextBlock Text="💡 并发设置只对RWKV引擎有效，控制同一秒内提交的最大不同文本内容数。GPU/显存占用超95%时按批次上限分批发送请求。" FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="0,6,0,0"/>
                             </StackPanel>
                         </Border>
 
@@ -227,7 +349,7 @@
                 <TextBlock x:Name="StatusBarText" Text="就绪"/>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">
-                <TextBlock Text="RWKV_术语翻译助手 v3.1"/>
+                <TextBlock Text="RWKV文档术语翻译助手 v3.1"/>
             </StatusBarItem>
         </StatusBar>
 

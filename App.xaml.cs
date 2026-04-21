@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -52,32 +53,47 @@ namespace DocumentTranslator
         {
             try
             {
+                _logger.LogInformation("开始初始化服务");
+
+                // 先创建并显示主窗口，确保GUI立即可见
+                var mainWindow = new MainWindow();
+                mainWindow.Show();
+
+                _logger.LogInformation("主窗口已显示，开始后台初始化服务");
+
+                // 在后台异步初始化服务（不阻塞窗口显示）
                 var ocrService = _serviceProvider.GetRequiredService<OcrInitializationService>();
                 var acrobatService = _serviceProvider.GetRequiredService<AcrobatDetectionService>();
 
-                _logger.LogInformation("开始初始化服务");
-
-                var ocrReady = await ocrService.InitializeOcrAsync();
-                if (ocrReady)
+                // OCR初始化可能很慢（需要下载tessdata），在后台线程执行
+                _ = Task.Run(async () =>
                 {
-                    _logger.LogInformation("OCR初始化成功");
-                }
-                else
-                {
-                    _logger.LogWarning("OCR初始化失败，OCR功能将不可用");
-                }
+                    try
+                    {
+                        var ocrReady = await ocrService.InitializeOcrAsync();
+                        if (ocrReady)
+                        {
+                            _logger.LogInformation("OCR初始化成功");
+                        }
+                        else
+                        {
+                            _logger.LogWarning("OCR初始化失败，OCR功能将不可用");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "OCR初始化异常");
+                    }
+                });
 
                 acrobatService.ShowAcrobatAvailableInfo();
 
                 _logger.LogInformation("服务初始化完成");
-
-                var mainWindow = new MainWindow();
-                mainWindow.Show();
             }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "服务初始化失败");
-                MessageBox.Show($"服务初始化失败：\n{ex.Message}", 
+                MessageBox.Show($"服务初始化失败：\n{ex.Message}",
                               "初始化错误", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }

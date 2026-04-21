@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using DocumentTranslator.Services.Translation.Translators;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Services.Translation
 {
@@ -22,6 +23,7 @@ namespace DocumentTranslator.Services.Translation
         private volatile bool _stopFlag;
         private readonly List<string> _currentOperations;
         private readonly Dictionary<string, int?> _translatorParallelismOverride; // 每个翻译器的并发覆盖
+        private readonly Dictionary<string, int?> _translatorSuggestedParallelism;
 
         public TranslationService(ILogger<TranslationService> logger)
         {
@@ -30,6 +32,7 @@ namespace DocumentTranslator.Services.Translation
             _config = new Dictionary<string, object>();
             _currentOperations = new List<string>();
             _translatorParallelismOverride = new Dictionary<string, int?>();
+            _translatorSuggestedParallelism = new Dictionary<string, int?>();
             _currentTranslatorType = "rwkv"; // 默认翻译器改为RWKV，避免误用外网服务
 
             // 先加载配置，再根据配置覆盖当前翻译器类型
@@ -91,21 +94,22 @@ namespace DocumentTranslator.Services.Translation
             {
                 var type = _currentTranslatorType?.ToLowerInvariant() ?? "";
 
-                if (type == "rwkv")
+                if (_translatorSuggestedParallelism.TryGetValue(type, out var runtimeSuggested) && runtimeSuggested.HasValue)
                 {
-                    return 30;
+                    return Math.Max(1, runtimeSuggested.Value);
                 }
 
                 var cores = Math.Max(1, Environment.ProcessorCount);
-                int baseSuggestion = cores;
-
-                baseSuggestion = Math.Max(2, Math.Min(cores * 2, 8));
+                int baseSuggestion = type == "rwkv"
+                    ? Math.Max(2, Math.Min(cores * 2, 30))
+                    : Math.Max(2, Math.Min(cores * 2, 8));
 
                 try
                 {
                     var gcInfo = GC.GetGCMemoryInfo();
                     var total = gcInfo.TotalAvailableMemoryBytes;
-                    var byMem = (int)Math.Max(1, Math.Min(16, total / (512L * 1024 * 1024)));
+                    var memoryCap = type == "rwkv" ? 30 : 16;
+                    var byMem = (int)Math.Max(1, Math.Min(memoryCap, total / (512L * 1024 * 1024)));
                     baseSuggestion = Math.Max(1, Math.Min(baseSuggestion, byMem));
                 }
                 catch { }
@@ -124,8 +128,9 @@ namespace DocumentTranslator.Services.Translation
         /// </summary>
         public int GetEffectiveMaxParallelism()
         {
-            if (_currentTranslatorType == "rwkv" && _translatorParallelismOverride.TryGetValue("rwkv", out var rwkvParallelism) && rwkvParallelism.HasValue)
-                return Math.Max(1, rwkvParallelism.Value);
+            var type = _currentTranslatorType?.ToLowerInvariant() ?? "";
+            if (_translatorParallelismOverride.TryGetValue(type, out var parallelismOverride) && parallelismOverride.HasValue)
+                return Math.Max(1, parallelismOverride.Value);
             return GetSuggestedMaxParallelism();
         }
 
@@ -134,16 +139,22 @@ namespace DocumentTranslator.Services.Translation
         /// </summary>
         public void SetMaxParallelismOverride(int? value)
         {
-            if (_currentTranslatorType == "rwkv")
-            {
-                _translatorParallelismOverride["rwkv"] = value.HasValue ? Math.Max(1, value.Value) : null;
-                _logger.LogInformation($"RWKV引擎并发覆盖设置为: {_translatorParallelismOverride["rwkv"]?.ToString() ?? "未设置（使用建议值）"}");
-            }
-            else
-            {
-                _logger.LogInformation($"当前引擎为 {_currentTranslatorType}，并发设置只对RWKV引擎有效");
-            }
+            var type = _currentTranslatorType?.ToLowerInvariant() ?? "";
+            _translatorParallelismOverride[type] = value.HasValue ? Math.Max(1, value.Value) : null;
+            _logger.LogInformation($"{type}引擎并发覆盖设置为: {_translatorParallelismOverride[type]?.ToString() ?? "未设置（使用建议值）"}");
         }
+
+        public void SetSuggestedMaxParallelism(int? value, string translatorType = null)
+        {
+            var type = (translatorType ?? _currentTranslatorType ?? "rwkv").ToLowerInvariant();
+            _translatorSuggestedParallelism[type] = value.HasValue ? Math.Max(1, value.Value) : null;
+            _logger.LogInformation($"{type}引擎建议并发设置为: {_translatorSuggestedParallelism[type]?.ToString() ?? "未设置（使用自动估算）"}");
+        }
+
+        /// <summary>
+        /// 每批次并发请求上限（GPU资源超警戒时使用）
+        /// </summary>
+        public int BatchConcurrencyLimit { get; set; } = 50;
 
         public IEnumerable<string> AvailableTranslatorTypes => _translators.Keys;
 
@@ -155,6 +166,7 @@ namespace DocumentTranslator.Services.Translation
             try
             {
                 _logger.LogInformation($"重新初始化{translatorType}翻译器");
+                LoadConfiguration();
 
                 if (_translators.ContainsKey(translatorType))
                 {
@@ -194,6 +206,7 @@ namespace DocumentTranslator.Services.Translation
             try
             {
                 _logger.LogInformation($"以偏好模型重新初始化 {translatorType} 翻译器，模型: {preferredModel}");
+                LoadConfiguration();
 
                 if (_translators.ContainsKey(translatorType))
                 {
@@ -233,7 +246,7 @@ namespace DocumentTranslator.Services.Translation
         {
             try
             {
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
                 if (File.Exists(configPath))
                 {
                     var configJson = File.ReadAllText(configPath);
@@ -288,39 +301,40 @@ namespace DocumentTranslator.Services.Translation
                 var apiKey = rwkvConfig.GetValueOrDefault("api_key", "").ToString();
                 var modelFromConfig = rwkvConfig.GetValueOrDefault("model", "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118").ToString();
                 var timeoutFromConfig = Convert.ToInt32(rwkvConfig.GetValueOrDefault("timeout", 60));
-                var useBatchTranslate = Convert.ToBoolean(rwkvConfig.GetValueOrDefault("use_batch_translate", false));
+                var useBatchTranslate = Convert.ToBoolean(rwkvConfig.GetValueOrDefault("use_batch_translate", true));
 
-                // 如果 config.json 未提供 api_url，则尝试从 API_config/rwkv_api.json 读取
-                if (string.IsNullOrWhiteSpace(apiUrl))
+                try
                 {
-                    try
+                    var cfgPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config", "rwkv_api.json");
+                    if (System.IO.File.Exists(cfgPath))
                     {
-                        var cfgPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", "rwkv_api.json");
-                        if (System.IO.File.Exists(cfgPath))
+                        var json = System.IO.File.ReadAllText(cfgPath);
+                        var cfg = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
+
+                        var apiUrlCandidate = cfg.GetValueOrDefault("api_url", "").ToString();
+                        if (!string.IsNullOrWhiteSpace(apiUrlCandidate))
                         {
-                            var json = System.IO.File.ReadAllText(cfgPath);
-                            var cfg = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json) ?? new Dictionary<string, object>();
-                            apiUrl = cfg.GetValueOrDefault("api_url", "").ToString();
-                            // 支持从 rwkv_api.json 读取默认模型
-                            var modelCandidate = cfg.GetValueOrDefault("default_model", string.Empty)?.ToString();
-                            if (!string.IsNullOrWhiteSpace(modelCandidate))
-                                modelFromConfig = modelCandidate;
-                            // 支持从 rwkv_api.json 读取批量翻译模式
-                            var useBatchTranslateCandidate = cfg.GetValueOrDefault("use_batch_translate", false);
-                            if (useBatchTranslateCandidate != null)
-                                useBatchTranslate = Convert.ToBoolean(useBatchTranslateCandidate);
+                            apiUrl = apiUrlCandidate;
                         }
+
+                        var modelCandidate = cfg.GetValueOrDefault("default_model", string.Empty)?.ToString();
+                        if (!string.IsNullOrWhiteSpace(modelCandidate))
+                            modelFromConfig = modelCandidate;
+
+                        var useBatchTranslateCandidate = cfg.GetValueOrDefault("use_batch_translate", null);
+                        if (useBatchTranslateCandidate != null)
+                            useBatchTranslate = Convert.ToBoolean(useBatchTranslateCandidate);
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "读取 API_config/rwkv_api.json 失败");
-                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "读取 API_config/rwkv_api.json 失败");
                 }
 
                 // 若仍未获取到 apiUrl，使用内置默认地址（免密本地局域网 OpenAI 兼容服务）
                 if (string.IsNullOrWhiteSpace(apiUrl))
                 {
-                    apiUrl = "http://locahost:8000/translate/v1/batch-translate";
+                    apiUrl = "http://localhost:8000/translate/v1/batch-translate";
                     _logger.LogInformation("使用内置默认RWKV_API地址: {ApiUrl}", apiUrl);
                 }
 
@@ -331,7 +345,13 @@ namespace DocumentTranslator.Services.Translation
                     var maxConcurrency = GetEffectiveMaxParallelism();
 
                     _logger.LogInformation($"初始化RWKV翻译器，使用模型: {model}, API: {apiUrl}, 批量翻译模式: {useBatchTranslate}, 并发数: {maxConcurrency}");
-                    var translator = new RWKVTranslator(_logger, apiUrl, model, timeout, apiKey, useBatchTranslate, maxConcurrency);
+                    
+                    // 判断是否为llama.cpp推理服务（URL包含/v1/chat/completions或端口为8080）
+                    var isLlamaCpp = apiUrl.Contains("/v1/chat/completions", StringComparison.OrdinalIgnoreCase) ||
+                                     apiUrl.Contains("/v1/completions", StringComparison.OrdinalIgnoreCase) ||
+                                     (apiUrl.Contains(":8080") && !apiUrl.Contains("/translate/"));
+                    
+                    var translator = new RWKVTranslator(_logger, apiUrl, model, timeout, apiKey, useBatchTranslate, maxConcurrency, isLlamaCpp);
                     RWKVTranslator.GetMaxConcurrency = GetEffectiveMaxParallelism;
                     return translator;
                 }
@@ -362,7 +382,7 @@ namespace DocumentTranslator.Services.Translation
                     return envApiKey;
                 }
 
-                var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", $"{service}_api.json");
+                var configPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "API_config", $"{service}_api.json");
                 if (File.Exists(configPath))
                 {
                     var configJson = File.ReadAllText(configPath);

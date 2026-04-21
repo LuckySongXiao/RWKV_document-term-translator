@@ -1,31 +1,84 @@
-# .gitignore for C# / .NET Core projects
-
-# Build results
-[Bb]in/
-[Oo]bj/
-
-# Visual Studio files
-.vs/
-*.user
-*.userosscache
-*.sln.docstates
-*.suo
-*.cache
-
-# VS Code
-.vscode/
-
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-*~
-
-# Python (if any)
+# Python 虚拟环境
+venv/
+.venv/
 __pycache__/
 *.py[cod]
 
-# Sensitive config
-API_config/
+# 依赖缓存
+.pytest_cache/
+.coverage
+coverage.xml
+
+# 本地配置
+.env
+*.env
+
+# 构建输出
+build/
+dist/
+outputs/
+test_output/
+build_temp/
+localpycs/
+
+# C# 编译输出
+bin/
+obj/
+*.user
+*.suo
+*.cache
+
+# VSCode 配置
+.vscode/
+
+# IDE 配置
+.arts/
+.trae/
+.codebuddy/
+
+# Windows 系统文件
+Thumbs.db
+Desktop.ini
+
+# 日志文件
+*.log
+
+# 临时文件
+*.swp
+*.swo
+*.swn
+
+# 备份文件
+*.backup
+*.bak
+
+# 构建日志
+build_output.txt
+build_result.txt
+
+# llama_cpp 二进制文件（需要从外部下载）
+llama_cpp/
+
+# 模型文件（太大，不应上传）
+*.safetensors
+*.gguf
+*.pth
+*.bin
+*.ckpt
+rwkv_models/
+
+# 大型依赖库
+rwkv_lightning_libtorch/
+
+# 配置文件（可能包含敏感信息）
 config.json
+API_config/
+
+# 数据文件
+data/terminology.json
+data/terminology.json.backup
+Windows/terminology.json
+Windows/terminology.json.backup
+
+# 图标生成脚本
+make_rounded_logo.py

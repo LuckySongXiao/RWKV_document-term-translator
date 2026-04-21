@@ -5,6 +5,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Text.RegularExpressions;
+using DocumentTranslator.Helpers;
+using DocumentTranslator.Services.Translation.Translators;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
 using System.Text;
@@ -137,7 +139,7 @@ namespace DocumentTranslator.Services.Translation
                 }
 
                 // 生成输出文件路径
-                string outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+                string outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
                 if (!Directory.Exists(outputDir))
                 {
                     Directory.CreateDirectory(outputDir);
@@ -412,42 +414,37 @@ namespace DocumentTranslator.Services.Translation
 
         private async Task ProcessBatchAsync(List<CellProcessingContext> contexts, string worksheetName, StreamWriter csvWriter, object csvLock)
         {
-            var options = new ParallelOptions 
-            { 
-                MaxDegreeOfParallelism = _translationService.GetEffectiveMaxParallelism() 
-            };
-
-            await Parallel.ForEachAsync(contexts, options, async (ctx, ct) =>
+            // 先处理跳过的单元格
+            foreach (var ctx in contexts)
             {
                 if (ctx.ShouldSkip)
                 {
                     if (ctx.SkipReason == "skip_token")
                     {
-                         LogSkippedTranslation(ctx.OriginalText);
+                        LogSkippedTranslation(ctx.OriginalText);
                     }
                     else if (ctx.SkipReason == "already_translated")
                     {
-                        // 记录已翻译的日志
-                         LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.OriginalText, ctx.OriginalText, "跳过翻译", "");
+                        LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.OriginalText, ctx.OriginalText, "跳过翻译", "");
                     }
-                    return;
                 }
+            }
 
-                // 翻译逻辑
-                try 
+            // 收集需要翻译的单元格
+            var translatableContexts = contexts.Where(c => !c.ShouldSkip).ToList();
+            if (translatableContexts.Count == 0) return;
+
+            // 对每个需要翻译的单元格进行预处理（术语替换等）
+            foreach (var ctx in translatableContexts)
+            {
+                try
                 {
-                     // 术语预处理等逻辑... 复用 ProcessCellAsync 中的逻辑
-                     // 为了代码复用，我们将核心翻译逻辑提取到这里
-                     
                     var normalizedText = NormalizeUnitsNearNumbers(ctx.OriginalText);
                     ctx.PreprocessedText = normalizedText;
 
-                    // 术语处理
                     Dictionary<string, string> termsToUse = new Dictionary<string, string>(ctx.Terminology ?? new Dictionary<string, string>());
                     if (_useTerminology)
                     {
-                        // 注意：TermExtractor 应该是线程安全的，如果不安全，这里会有问题
-                        // 假设它是无状态的
                         var extracted = _termExtractor.ExtractRelevantTerms(ctx.OriginalText, _terminologyLanguageName, _sourceLang, _targetLang);
                         if (extracted != null && extracted.Any())
                         {
@@ -462,34 +459,138 @@ namespace DocumentTranslator.Services.Translation
                             }
                         }
                     }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, $"预处理单元格 [{ctx.Row},{ctx.Col}] 失败");
+                    ctx.PreprocessedText = ctx.OriginalText;
+                }
+            }
 
-                    var terminologyForTranslator = (_useTerminology && !_preprocessTerms) ? termsToUse : null;
+            // 检查是否使用 RWKV 翻译器的真正批量翻译接口
+            var rwkvTranslator = _translationService.CurrentTranslator as Translators.RWKVTranslator;
+            if (rwkvTranslator != null)
+            {
+                await ExecuteRwkvBatchTranslationAsync(translatableContexts, worksheetName, csvWriter, csvLock, rwkvTranslator);
+            }
+            else
+            {
+                // 非 RWKV 翻译器：使用 Parallel.ForEachAsync 逐个翻译
+                var options = new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = _translationService.GetEffectiveMaxParallelism()
+                };
 
-                    // 翻译
-                    // 这里可以记录开始时间
-                    var translated = await TranslateTextWithRetryAsync(ctx.PreprocessedText, terminologyForTranslator, ctx.OriginalText);
-                    
-                    if (!string.IsNullOrEmpty(translated))
+                await Parallel.ForEachAsync(translatableContexts, options, async (ctx, ct) =>
+                {
+                    try
                     {
-                        ctx.TranslatedText = translated;
-                        ctx.TranslationStatus = translated.Contains("[长度异常]") ? "长度异常" : "翻译成功";
-                        
-                        // 记录 CSV
-                        LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.PreprocessedText, translated, ctx.TranslationStatus);
+                        var translated = await TranslateTextWithRetryAsync(ctx.PreprocessedText, null, ctx.OriginalText);
+
+                        if (!string.IsNullOrEmpty(translated))
+                        {
+                            ctx.TranslatedText = translated;
+                            ctx.TranslationStatus = translated.Contains("[长度异常]") ? "长度异常" : "翻译成功";
+                            LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.PreprocessedText, translated, ctx.TranslationStatus);
+                        }
+                        else
+                        {
+                            ctx.TranslationStatus = "翻译失败";
+                            LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.PreprocessedText, "翻译失败", "翻译失败");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.TranslationStatus = "异常失败";
+                        _logger.LogWarning(ex, $"翻译单元格 [{ctx.Row},{ctx.Col}] 失败");
+                        LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, "异常失败", "异常失败", "异常失败");
+                    }
+                });
+            }
+        }
+
+        /// <summary>
+        /// 使用 RWKV 翻译器的真正批量接口翻译单元格
+        /// </summary>
+        private async Task ExecuteRwkvBatchTranslationAsync(
+            List<CellProcessingContext> contexts,
+            string worksheetName,
+            StreamWriter csvWriter,
+            object csvLock,
+            Translators.RWKVTranslator rwkvTranslator)
+        {
+            int maxConcurrency = Math.Max(1, _translationService.GetEffectiveMaxParallelism());
+            int batchSize = Math.Max(1, maxConcurrency);
+            int finished = 0;
+            int total = contexts.Count;
+            int totalBatches = (contexts.Count + batchSize - 1) / batchSize;
+
+            _logger.LogInformation($"Excel RWKV批量翻译：批大小={batchSize}，任务数={total}，批次数={totalBatches}，并发限制={maxConcurrency}");
+
+            // 构建所有批次
+            var batches = new List<List<CellProcessingContext>>();
+            for (int offset = 0; offset < contexts.Count; offset += batchSize)
+            {
+                batches.Add(contexts.Skip(offset).Take(batchSize).ToList());
+            }
+
+            // 并行执行所有批次，信号量由 TranslateBatchAsync 内部控制并发
+            var batchTasks = batches.Select(async (batch, batchIndex) =>
+            {
+                IReadOnlyList<string> batchResults = null;
+
+                try
+                {
+                    batchResults = await rwkvTranslator.TranslateBatchAsync(
+                        batch.Select(x => x.PreprocessedText ?? x.OriginalText).ToList(),
+                        _sourceLang, _targetLang);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, $"Excel RWKV批量翻译失败，批次: {batchIndex + 1}/{totalBatches}，将回退逐段翻译");
+                }
+
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    var ctx = batch[i];
+                    string translatedText;
+
+                    if (batchResults != null && i < batchResults.Count && !string.IsNullOrWhiteSpace(batchResults[i]))
+                    {
+                        translatedText = batchResults[i];
+                    }
+                    else
+                    {
+                        // 回退到逐段翻译
+                        try
+                        {
+                            translatedText = await TranslateTextWithRetryAsync(ctx.PreprocessedText ?? ctx.OriginalText, null, ctx.OriginalText);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, $"回退翻译单元格 [{ctx.Row},{ctx.Col}] 也失败");
+                            translatedText = null;
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(translatedText))
+                    {
+                        ctx.TranslatedText = translatedText;
+                        ctx.TranslationStatus = translatedText.Contains("[长度异常]") ? "长度异常" : "翻译成功";
+                        LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.PreprocessedText, translatedText, ctx.TranslationStatus);
                     }
                     else
                     {
                         ctx.TranslationStatus = "翻译失败";
                         LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, ctx.PreprocessedText, "翻译失败", "翻译失败");
                     }
+
+                    int currentFinished = Interlocked.Increment(ref finished);
                 }
-                catch (Exception ex)
-                {
-                    ctx.TranslationStatus = "异常失败";
-                     _logger.LogWarning(ex, $"翻译单元格 [{ctx.Row},{ctx.Col}] 失败");
-                     LogTranslationToCSV(csvWriter, csvLock, worksheetName, $"{ctx.Row},{ctx.Col}", ctx.OriginalText, "异常失败", "异常失败", "异常失败");
-                }
-            });
+            }).ToArray();
+
+            await Task.WhenAll(batchTasks);
+            _logger.LogInformation($"Excel RWKV批量翻译完成：{finished}/{total} 个单元格");
         }
 
         private void ApplyContextToWorksheet(ExcelWorksheet worksheet, CellProcessingContext ctx)
@@ -1533,7 +1634,7 @@ namespace DocumentTranslator.Services.Translation
             try
             {
                 // 生成输出文件路径
-                string outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "输出");
+                string outputDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "输出");
                 if (!Directory.Exists(outputDir))
                 {
                     Directory.CreateDirectory(outputDir);

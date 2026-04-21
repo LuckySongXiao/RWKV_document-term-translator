@@ -13,6 +13,7 @@ using System.Windows.Media;
 using Microsoft.Win32;
 using Newtonsoft.Json;
 using System.ComponentModel;
+using DocumentTranslator.Helpers;
 
 namespace DocumentTranslator.Windows
 {
@@ -38,7 +39,7 @@ namespace DocumentTranslator.Windows
         {
             InitializeComponent();
             _translationService = translationService;
-            _terminologyPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
+            _terminologyPath = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "terminology.json");
             _languageReversePaths = new Dictionary<string, string>();
             _terminologyItems = new ObservableCollection<TerminologyItem>();
 
@@ -1334,7 +1335,7 @@ namespace DocumentTranslator.Windows
                         return;
                     }
 
-                    var dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
+                    var dataDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
                     if (!Directory.Exists(dataDir))
                     {
                         Directory.CreateDirectory(dataDir);
@@ -2372,7 +2373,7 @@ namespace DocumentTranslator.Windows
                 _reverseTerminology = new Dictionary<string, Dictionary<string, object>>();
                 _languageReversePaths.Clear();
 
-                var dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
+                var dataDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
                 System.Diagnostics.Debug.WriteLine($"外译中数据目录路径: {dataDir}");
                 if (!Directory.Exists(dataDir))
                 {
@@ -2459,7 +2460,7 @@ namespace DocumentTranslator.Windows
 
                 LoadReverseTerminology();
 
-                var dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
+                var dataDir = PathHelper.SafeCombine(AppDomain.CurrentDomain.BaseDirectory, "data", "reverse");
                 if (!Directory.Exists(dataDir))
                 {
                     Directory.CreateDirectory(dataDir);

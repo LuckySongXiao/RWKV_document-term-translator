@@ -3,11 +3,12 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net6.0-windows</TargetFramework>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>logo.ico</ApplicationIcon>
-    <AssemblyName>RWKV_术语文档翻译助手</AssemblyName>
+    <AssemblyName>RWKV文档术语翻译助手</AssemblyName>
     <AssemblyDescription>支持Word、PDF、Excel、PowerPoint、TXT等多种格式的智能文档翻译工具</AssemblyDescription>
-    <Copyright>糖醋鹦鹉 © 2026</Copyright>
+    <Copyright>RWKV团队 © 2024</Copyright>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
 
     <!-- 单文件发布配置 -->
@@ -19,7 +20,7 @@
     <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
 
     <!-- 警告抑制 -->
-    <NoWarn>$(NoWarn);NU1701;NU1702;NU1603;CS8625</NoWarn>
+    <NoWarn>$(NoWarn);NU1701;NU1702;NU1603;CS8625;CS8632;IL3000;NETSDK1138;CA1416</NoWarn>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Nullable>disable</Nullable>
 
@@ -44,6 +45,8 @@
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <!-- PPT处理相关包 -->
     <PackageReference Include="ClosedXML" Version="0.104.0" />
+    <!-- GPU检测和WMI -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <!-- 单文件发布时需要包含的文件 -->
@@ -87,6 +90,22 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('rwkv_lightning_libtorch_win')">
+    <Content Include="rwkv_lightning_libtorch_win\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('rwkv_lightning_libtorch')">
+    <Content Include="rwkv_lightning_libtorch\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
   <!-- 单文件发布时保留的程序集 -->
   <ItemGroup>
     <TrimmerRootAssembly Include="DocumentFormat.OpenXml" />
@@ -96,6 +115,22 @@
     <TrimmerRootAssembly Include="Newtonsoft.Json" />
   </ItemGroup>
 
-  <!-- Test exclusions removed -->
+  <!-- 排除测试项目文件 -->
+  <ItemGroup>
+    <Compile Remove="PdfTranslationTest\**\*.cs" />
+    <Compile Remove="services\Translation\PDFTranslateTest.cs" />
+    <Compile Remove="services\Translation\PPTTranslationTests.cs" />
+    <Compile Remove="TerminologyTest\**\*.cs" />
+    <Compile Remove="RWKVTest\**\*.cs" />
+    <Compile Remove="TestRWKVConnection\**\*.cs" />
+    <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="transplantation\cs_wrapper\**\*.cs" />
+  </ItemGroup>
+
+  <!-- 排除测试项目的obj目录 -->
+  <ItemGroup>
+    <Compile Remove="TestRWKVConnection\obj\**\*.cs" />
+    <Compile Remove="obj\**\*.cs" />
+  </ItemGroup>
 
 </Project>
