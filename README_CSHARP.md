@@ -40,10 +40,22 @@ dotnet --version
 ### 2. 下载必要依赖
 
 #### 下载llama_cpp推理引擎
-```bash
-# 使用提供的批处理脚本下载
-.\download_cpu.bat          # CPU版本
-.\download_libtorch.bat     # LibTorch版本（需要CUDA）
+```
+llama_cpp推理库：
+前往https://github.com/ggml-org/llama.cpp/releases
+下载Releases中的Assets下最新版本的推理库，如下所示：
+llama-b8880-bin-win-cpu-x64.zip ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的llama_cpp/cpu文件夹中
+llama-b8880-bin-win-cuda-12.4-x64.zip (二选一，看GPU支持哪个就选哪个) ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的llama_cpp/cuda文件夹中
+llama-b8880-bin-win-cuda-13.1-x64.zip (二选一，看GPU支持哪个就选哪个) ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的llama_cpp/cuda文件夹中
+llama-b8880-bin-win-sycl-x64.zip ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的llama_cpp/sycl文件夹中
+llama-b8880-bin-win-vulkan-x64.zip ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的llama_cpp/vulkan文件夹中
+```
+#### 下载rwkv_lightning_libtorch推理引擎
+rwkv_lightning_libtorch推理库：
+```
+前往https://github.com/Alic-Li/rwkv_lightning_libtorch/releases
+下载Releases中的rwkv_lightning_libtorch2.10.0+cu132_sm75-120_Windows_amd64.zip ，解压后将.exe文件所在目录下的所有文件都复制到本项目目录下的rwkv_lightning_libtorch_win文件夹中
+将项目源码下载并放置到本项目目录下的rwkv_lightning_libtorch文件夹中
 ```
 
 或手动下载：
@@ -135,7 +147,7 @@ DocumentTranslator.exe
 
 1. **选择文档**
    - 点击"选择文件"按钮
-   - 支持Word、Excel、PDF、PPT格式
+   - 支持Word、Excel格式
 
 2. **配置翻译**
    - 选择翻译方向（中文↔外语）
