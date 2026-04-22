@@ -67,6 +67,7 @@ namespace DocumentTranslator.Windows
         private void LoadAllConfigs()
         {
             LoadrwkvConfig();
+            LoadLlamaCppConfig();
         }
 
         #region RWKV配置
@@ -286,6 +287,241 @@ namespace DocumentTranslator.Windows
                 _logger.LogError(ex, "保存RWKV配置失败");
                 MessageBox.Show($"❌ 保存配置失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+        #endregion
+
+        #region llama_cpp配置
+        private void LoadLlamaCppConfig()
+        {
+            try
+            {
+                var llamaConfig = _configurationManager.GetTranslatorConfig("llama_cpp");
+                var configDict = _configurationManager.GetConfig<Dictionary<string, object>>("llama_cpp_translator", new Dictionary<string, object>()) ?? new Dictionary<string, object>();
+
+                // API地址
+                var apiUrl = configDict.GetValueOrDefault("api_url", "http://127.0.0.1:8080/v1/completions").ToString();
+                llamaCppApiUrl.Text = apiUrl;
+
+                // 加载可用的API地址列表
+                LoadLlamaCppApiUrls(apiUrl);
+
+                // 推理模式
+                var modeStr = configDict.GetValueOrDefault("mode", "completions").ToString();
+                llamaCppMode.SelectedIndex = modeStr.Equals("chat", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
+                // 对话模板
+                var chatTemplate = configDict.GetValueOrDefault("chat_template", "rwkv-world").ToString();
+                llamaCppChatTemplate.Text = chatTemplate;
+
+                // 超时时间
+                var timeout = configDict.GetValueOrDefault("timeout", 120).ToString();
+                llamaCppTimeout.Text = timeout;
+
+                // 翻译规则
+                var translationRules = configDict.GetValueOrDefault("translation_rules", null);
+                if (translationRules is Dictionary<string, object> rules)
+                {
+                    llamaCppEosToken.Text = rules.GetValueOrDefault("eos_token", "").ToString();
+                    llamaCppEnSeparator.Text = UnescapeNewlines(rules.GetValueOrDefault("en_separator", "\\n\\nEnglish").ToString());
+                    llamaCppZhSeparator.Text = UnescapeNewlines(rules.GetValueOrDefault("zh_separator", "\\n\\nChinese").ToString());
+                    llamaCppJaSeparator.Text = UnescapeNewlines(rules.GetValueOrDefault("ja_separator", "\\n\\nJapanese").ToString());
+                }
+                else
+                {
+                    llamaCppEosToken.Text = "";
+                    llamaCppEnSeparator.Text = "\\n\\nEnglish";
+                    llamaCppZhSeparator.Text = "\\n\\nChinese";
+                    llamaCppJaSeparator.Text = "\\n\\nJapanese";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "加载llama_cpp配置失败");
+                MessageBox.Show($"加载llama_cpp配置失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void LoadLlamaCppApiUrls(string currentUrl)
+        {
+            try
+            {
+                llamaCppApiUrl.Items.Clear();
+
+                var defaultUrls = new List<string>
+                {
+                    "http://127.0.0.1:8080/v1/completions",
+                    "http://127.0.0.1:8080/v1/chat/completions"
+                };
+
+                var configDict = _configurationManager.GetConfig<Dictionary<string, object>>("llama_cpp_translator", null);
+                if (configDict != null)
+                {
+                    var availableUrls = configDict.GetValueOrDefault("available_api_urls", null);
+                    if (availableUrls is Newtonsoft.Json.Linq.JArray jArray)
+                    {
+                        foreach (var url in jArray)
+                        {
+                            var urlStr = url?.ToString();
+                            if (!string.IsNullOrWhiteSpace(urlStr) && !defaultUrls.Contains(urlStr))
+                            {
+                                defaultUrls.Add(urlStr);
+                            }
+                        }
+                    }
+                }
+
+                foreach (var url in defaultUrls)
+                {
+                    llamaCppApiUrl.Items.Add(url);
+                }
+
+                llamaCppApiUrl.Text = currentUrl;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "加载llama_cpp API地址列表失败");
+            }
+        }
+
+        private async void TestLlamaCppConnection(object sender, RoutedEventArgs e)
+        {
+            var button = sender as Button;
+            button.IsEnabled = false;
+            button.Content = "🔄 测试中...";
+
+            try
+            {
+                if (_translationService == null)
+                {
+                    MessageBox.Show("❌ 翻译服务未初始化", "测试结果", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                _translationService.CurrentTranslatorType = "llama_cpp";
+
+                if (_translationService.CurrentTranslator == null)
+                {
+                    MessageBox.Show("❌ llama_cpp翻译器未初始化，请检查配置", "测试结果", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                var result = await _translationService.CurrentTranslator.TestConnectionAsync();
+
+                if (result == true)
+                {
+                    MessageBox.Show("✅ llama_cpp连接测试成功！", "测试结果", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show("❌ llama_cpp连接测试失败，请检查服务是否运行", "测试结果", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "llama_cpp连接测试异常");
+                MessageBox.Show($"❌ 连接测试异常: {ex.Message}", "测试结果", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                button.IsEnabled = true;
+                button.Content = "🧪 测试连接";
+            }
+        }
+
+        private void SaveLlamaCppConfig(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var currentUrl = llamaCppApiUrl.Text;
+                var modeItem = llamaCppMode.SelectedItem as ComboBoxItem;
+                var modeStr = modeItem?.Tag?.ToString() ?? "completions";
+                var chatTemplate = llamaCppChatTemplate.Text;
+                var timeout = int.Parse(llamaCppTimeout.Text);
+
+                // 翻译规则
+                var eosToken = llamaCppEosToken.Text;
+                var enSeparator = EscapeNewlines(llamaCppEnSeparator.Text);
+                var zhSeparator = EscapeNewlines(llamaCppZhSeparator.Text);
+                var jaSeparator = EscapeNewlines(llamaCppJaSeparator.Text);
+
+                // 收集可用的API地址
+                List<string> availableUrls = new List<string>
+                {
+                    "http://127.0.0.1:8080/v1/completions",
+                    "http://127.0.0.1:8080/v1/chat/completions"
+                };
+
+                var configDict = _configurationManager.GetConfig<Dictionary<string, object>>("llama_cpp_translator", null);
+                if (configDict != null)
+                {
+                    var existingUrls = configDict.GetValueOrDefault("available_api_urls", null);
+                    if (existingUrls is Newtonsoft.Json.Linq.JArray jArray)
+                    {
+                        foreach (var url in jArray)
+                        {
+                            var urlStr = url?.ToString();
+                            if (!string.IsNullOrWhiteSpace(urlStr) && !availableUrls.Contains(urlStr))
+                            {
+                                availableUrls.Add(urlStr);
+                            }
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(currentUrl) && !availableUrls.Contains(currentUrl))
+                {
+                    availableUrls.Add(currentUrl);
+                }
+
+                var config = new Dictionary<string, object>
+                {
+                    ["type"] = "llama_cpp",
+                    ["api_url"] = currentUrl,
+                    ["model"] = "",
+                    ["timeout"] = timeout,
+                    ["mode"] = modeStr,
+                    ["chat_template"] = chatTemplate,
+                    ["available_api_urls"] = availableUrls,
+                    ["translation_rules"] = new Dictionary<string, object>
+                    {
+                        ["eos_token"] = eosToken,
+                        ["en_separator"] = enSeparator,
+                        ["zh_separator"] = zhSeparator,
+                        ["ja_separator"] = jaSeparator
+                    }
+                };
+
+                _configurationManager.SaveConfig("llama_cpp_translator", config);
+
+                MessageBox.Show("✅ llama_cpp配置保存成功！", "保存结果", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                _translationService.ReinitializeTranslator("llama_cpp");
+
+                _logger.LogInformation($"llama_cpp配置已保存: API地址={currentUrl}, 模式={modeStr}, 对话模板={chatTemplate}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "保存llama_cpp配置失败");
+                MessageBox.Show($"❌ 保存配置失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>
+        /// 将文本中的 \n 转义序列转换为实际换行符
+        /// </summary>
+        private static string UnescapeNewlines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            return text.Replace("\\n", "\n");
+        }
+
+        /// <summary>
+        /// 将实际换行符转换为 \n 转义序列（用于显示和存储）
+        /// </summary>
+        private static string EscapeNewlines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            return text.Replace("\n", "\\n").Replace("\r", "");
         }
         #endregion
 

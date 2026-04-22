@@ -18,6 +18,7 @@ using DocumentTranslator.Services.Logging;
 using DocumentTranslator.Services;
 using DocumentTranslator.Services.RwkvLocal;
 using DocumentTranslator.Services.RwkvLocal.Models;
+using Newtonsoft.Json;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Presentation;
@@ -319,13 +320,19 @@ namespace DocumentTranslator
 
                 // 扫描模型
                 _availableModels = await _modelManagementService!.ScanModelsAsync();
+
+                // 根据当前推理工具类型过滤模型格式
+                var initIsLlamaCpp = _currentToolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+                var initFilteredModels = _availableModels.Where(m =>
+                    initIsLlamaCpp ? m.Format == ModelFormat.GGUF : m.Format != ModelFormat.GGUF
+                ).ToList();
                 
                 await Dispatcher.InvokeAsync(() =>
                 {
                     ModelSelectorCombo.Items.Clear();
-                    if (_availableModels.Count > 0)
+                    if (initFilteredModels.Count > 0)
                     {
-                        foreach (var model in _availableModels)
+                        foreach (var model in initFilteredModels)
                         {
                             ModelSelectorCombo.Items.Add(new ComboBoxItem 
                             { 
@@ -334,14 +341,16 @@ namespace DocumentTranslator
                             });
                         }
                         ModelSelectorCombo.SelectedIndex = 0;
-                        LogMessage($"📦 扫描到 {_availableModels.Count} 个模型文件");
+                        LogMessage($"📦 扫描到 {initFilteredModels.Count} 个模型文件");
                     }
                     else
                     {
                         ModelSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未找到模型文件" });
                         ModelSelectorCombo.SelectedIndex = 0;
                         LogMessage("⚠️ 未在rwkv_models目录找到模型文件");
-                        LocalModelInfoText.Text = "请将 .safetensors 或 .pth 模型文件放入 rwkv_models 目录";
+                        LocalModelInfoText.Text = initIsLlamaCpp
+                            ? "请将 .gguf 模型文件放入 rwkv_models 目录"
+                            : "请将 .safetensors 或 .pth 模型文件放入 rwkv_models 目录";
                     }
 
                     // 检查推理工具
@@ -562,7 +571,9 @@ namespace DocumentTranslator
                         return;
                     }
 
-                    var success = await _llamaCppProcessService.StartAsync(selectedModel, selectedGpu, toolName);
+                    // 读取配置的对话模板
+                    var chatTemplate = GetLlamaCppChatTemplate();
+                    var success = await _llamaCppProcessService.StartAsync(selectedModel, selectedGpu, toolName, chatTemplate: chatTemplate);
 
                     if (success)
                     {
@@ -570,7 +581,15 @@ namespace DocumentTranslator
                         var concurrency = _llamaCppProcessService.Status.MaxConcurrency;
                         LogMessage($"✅ llama-server 启动成功 - 端口: {port}, 并发: {concurrency}");
 
-                        _translationService.SetSuggestedMaxParallelism(concurrency, "rwkv");
+                        // 切换到 llama_cpp 翻译器，使用续写模式（与 rwkv_lightning 翻译端点等效）
+                        var llamaApiUrl = $"http://127.0.0.1:{port}/v1/completions";
+                        UpdateLlamaCppApiUrl(llamaApiUrl);
+                        _translationService.ReinitializeTranslator("llama_cpp");
+                        _translationService.CurrentTranslatorType = "llama_cpp";
+                        _currentEngine = "llama_cpp";
+                        LogMessage($"🔗 已切换到 llama_cpp 翻译器，API: {llamaApiUrl}");
+
+                        _translationService.SetSuggestedMaxParallelism(concurrency, "llama_cpp");
                         UpdateSuggestedParallelism();
                         LogMessage($"⚡ 已自动应用并发设置: {concurrency}");
                     }
@@ -606,6 +625,14 @@ namespace DocumentTranslator
                     if (success)
                     {
                         LogMessage($"✅ 本地模型启动成功 - 端口: {_rwkvProcessService.Status.Port}, 并发: {_rwkvProcessService.Status.MaxConcurrency}");
+
+                        // 切换到 rwkv 翻译器
+                        var rwkvApiUrl = $"http://127.0.0.1:{_rwkvProcessService.Status.Port}/translate/v1/batch-translate";
+                        UpdateRwkvApiUrl(rwkvApiUrl);
+                        _translationService.ReinitializeTranslator("rwkv");
+                        _translationService.CurrentTranslatorType = "rwkv";
+                        _currentEngine = "rwkv";
+                        LogMessage($"🔗 已切换到 rwkv 翻译器，API: {rwkvApiUrl}");
 
                         _translationService.SetSuggestedMaxParallelism(_rwkvProcessService.Status.MaxConcurrency, "rwkv");
                         UpdateSuggestedParallelism();
@@ -694,12 +721,18 @@ namespace DocumentTranslator
 
             _availableModels = await _modelManagementService.ScanModelsAsync();
 
+            // 根据当前推理工具类型过滤模型格式
+            var isLlamaCpp = _currentToolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+            var filteredModels = _availableModels.Where(m =>
+                isLlamaCpp ? m.Format == ModelFormat.GGUF : m.Format != ModelFormat.GGUF
+            ).ToList();
+
             await Dispatcher.InvokeAsync(() =>
             {
                 ModelSelectorCombo.Items.Clear();
-                if (_availableModels.Count > 0)
+                if (filteredModels.Count > 0)
                 {
-                    foreach (var model in _availableModels)
+                    foreach (var model in filteredModels)
                     {
                         var item = new ComboBoxItem
                         {
@@ -1471,6 +1504,91 @@ namespace DocumentTranslator
             LogMessage("🗑️ 已清除文件选择");
         }
 
+        /// <summary>
+        /// 更新 rwkv_api.json 中的 api_url 配置
+        /// </summary>
+        private void UpdateRwkvApiUrl(string apiUrl)
+        {
+            try
+            {
+                var configPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "API_config", "rwkv_api.json");
+                if (System.IO.File.Exists(configPath))
+                {
+                    var json = System.IO.File.ReadAllText(configPath);
+                    var cfg = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
+                    if (cfg != null)
+                    {
+                        cfg["api_url"] = apiUrl;
+                        var updatedJson = Newtonsoft.Json.JsonConvert.SerializeObject(cfg, Newtonsoft.Json.Formatting.Indented);
+                        System.IO.File.WriteAllText(configPath, updatedJson);
+                        _logger.LogInformation("已更新 rwkv_api.json 中的 api_url 为: {ApiUrl}", apiUrl);
+                    }
+                }
+
+                // 同时更新 config.json 中的 rwkv_translator.api_url
+                if (_configurationManager != null)
+                {
+                    var rwkvConfig = _configurationManager.GetConfig<Dictionary<string, object>>("rwkv_translator", new Dictionary<string, object>());
+                    if (rwkvConfig != null)
+                    {
+                        rwkvConfig["api_url"] = apiUrl;
+                        _configurationManager.SaveConfig("rwkv_translator", rwkvConfig);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "更新 RWKV API URL 配置失败");
+            }
+        }
+
+        /// <summary>
+        /// 更新 config.json 中 llama_cpp_translator 的 api_url 配置
+        /// </summary>
+        private void UpdateLlamaCppApiUrl(string apiUrl)
+        {
+            try
+            {
+                if (_configurationManager != null)
+                {
+                    var llamaConfig = _configurationManager.GetConfig<Dictionary<string, object>>("llama_cpp_translator", new Dictionary<string, object>());
+                    if (llamaConfig != null)
+                    {
+                        llamaConfig["api_url"] = apiUrl;
+                        _configurationManager.SaveConfig("llama_cpp_translator", llamaConfig);
+                        _logger.LogInformation("已更新 llama_cpp_translator.api_url 为: {ApiUrl}", apiUrl);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "更新 LlamaCpp API URL 配置失败");
+            }
+        }
+
+        /// <summary>
+        /// 从配置中读取 llama_cpp 的对话模板名称
+        /// </summary>
+        private string GetLlamaCppChatTemplate()
+        {
+            try
+            {
+                if (_configurationManager != null)
+                {
+                    var llamaConfig = _configurationManager.GetConfig<Dictionary<string, object>>("llama_cpp_translator", null);
+                    if (llamaConfig != null)
+                    {
+                        return llamaConfig.GetValueOrDefault("chat_template", "rwkv-world").ToString();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "读取 LlamaCpp chat_template 配置失败");
+            }
+            return "rwkv-world";
+        }
+
         private void UpdateApiUrlDisplay()
         {
             try
@@ -1826,8 +1944,14 @@ namespace DocumentTranslator
         // 菜单事件
         private void OpenrwkvSettings(object sender, RoutedEventArgs e)
         {
-            LogMessage("⚙️ 打开RWKV设置");
+            LogMessage("⚙️ 打开RWKV_lightning设置");
             OpenEngineConfig("rwkv");
+        }
+
+        private void OpenLlamaCppSettings(object sender, RoutedEventArgs e)
+        {
+            LogMessage("⚙️ 打开llama_cpp设置");
+            OpenEngineConfig("llama_cpp");
         }
 
         private void OpenTranslationAssistant(object sender, RoutedEventArgs e)
@@ -1917,6 +2041,7 @@ namespace DocumentTranslator
                 var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
                 var selectedToolContent = selectedToolItem?.Content as string ?? "";
                 var toolName = ResolveToolName(selectedToolContent);
+                _currentToolName = toolName;
                 var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
 
                 if (isLlamaCpp)
@@ -2239,7 +2364,9 @@ namespace DocumentTranslator
 
         protected override void OnClosed(EventArgs e)
         {
-            // 停止本地模型服务
+            // 停止所有本地推理服务
+            _llamaCppProcessService?.StopAsync().Wait(TimeSpan.FromSeconds(5));
+            _llamaCppProcessService?.Dispose();
             _rwkvProcessService?.StopAsync().Wait(TimeSpan.FromSeconds(5));
             _rwkvProcessService?.Dispose();
             _gpuResourceService?.Dispose();

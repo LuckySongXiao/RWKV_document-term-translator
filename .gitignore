@@ -69,6 +69,8 @@ rwkv_models/
 
 # 大型依赖库
 rwkv_lightning_libtorch/
+rwkv_lightning_libtorch_win/
+libtorch-win-shared-with-deps-*/
 
 # 配置文件（可能包含敏感信息）
 config.json
@@ -82,3 +84,25 @@ Windows/terminology.json.backup
 
 # 图标生成脚本
 make_rounded_logo.py
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 翻译日志
+translation_log_*.txt
+
+# 导出的术语文件
+terminology_export_*.md
+
+# 测试文件
+test_curl.sh
+测试文档.txt
+用户使用说明.txt
+
+# 移植相关临时文件
+transplantation/
+
+# 解决方案文件（旧的）
+文档翻译助手V3.sln

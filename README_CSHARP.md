@@ -24,13 +24,7 @@
 ### 必需组件
 1. **Windows 10/11** (x64)
 2. **.NET 6.0 Runtime** 或更高版本
-3. **Python 3.7+** (用于翻译引擎)
-4. **Visual Studio 2022** (开发环境，可选)
-
-### Python依赖
-```bash
-pip install -r requirements.txt
-```
+3. **Visual Studio 2022** (开发环境，可选)
 
 ## 快速开始
 
@@ -95,48 +89,53 @@ DocumentTranslator.exe
 
 ### 整体架构
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   C# WPF GUI    │    │  Python Bridge  │    │ Python Backend  │
-│                 │    │                 │    │                 │
-│ - 用户界面      │◄──►│ - 进程通信      │◄──►│ - 翻译引擎      │
-│ - 事件处理      │    │ - JSON序列化    │    │ - 文档处理      │
-│ - 状态管理      │    │ - 异常处理      │    │ - 术语库管理    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    C# WPF 应用程序                      │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   用户界面    │  │  翻译服务层   │  │  本地推理引擎  │  │
+│  │              │  │              │  │              │  │
+│  │ - MainWindow │  │ - Translation│  │ - LlamaCpp   │  │
+│  │ - Windows/   │◄►│   Service    │◄►│   Process    │  │
+│  │ - 配置窗口    │  │ - BaseTrans  │  │ - RWKV       │  │
+│  └──────────────┘  │   lator      │  │   Lightning  │  │
+│                    │ - RWKVTrans  │  └──────────────┘  │
+│                    │   lator      │                    │
+│                    └──────────────┘                    │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### 核心组件
 
-#### 1. MainWindow (主窗口)
-- **职责**：用户界面展示和交互
-- **特性**：
-  - 响应式布局设计
-  - 实时状态更新
-  - 异步操作处理
-  - 进度条显示
+#### 1. 用户界面层
+- **MainWindow**: 主窗口，翻译任务管理
+- **TranslationAssistantWindow**: 翻译助手窗口
+- **OutputConfigWindow**: 输出配置窗口
+- **Windows/**: 各类配置和编辑窗口
+  - EngineConfigWindow: 引擎配置
+  - ModelSelectWindow: 模型选择
+  - TerminologyEditorWindow: 术语编辑
+  - TranslationRulesWindow: 翻译规则
 
-#### 2. PythonBridge (Python桥接)
-- **职责**：C#与Python后端通信
-- **特性**：
-  - 进程间通信
-  - JSON数据序列化
-  - 异常处理和重试
-  - 超时控制
+#### 2. 翻译服务层 (services/Translation/)
+- **BaseTranslator**: 翻译器基类
+- **RWKVTranslator**: RWKV翻译引擎实现
+- **LlamaCppTranslator**: LlamaCpp翻译引擎实现
+- **TranslationService**: 翻译服务协调器
+- **DocumentProcessor**: 文档处理器
+- **TermExtractor**: 术语提取器
 
-#### 3. Python Scripts (Python脚本)
-- **职责**：实际的翻译处理逻辑
-- **特性**：
-  - 复用现有Python代码
-  - 标准化输入输出
-  - 详细的错误报告
-  - 进度回调支持
+#### 3. 本地推理服务 (services/RwkvLocal/)
+- **LlamaCppProcessService**: LlamaCpp进程管理
+- 本地模型加载和推理
 
 ## 使用指南
 
 ### 基本操作流程
 
 1. **选择文档**
-   - 点击"🔍 选择文件"按钮
-   - 支持Word、Excel格式
+   - 点击"选择文件"按钮
+   - 支持Word、Excel、PDF、PPT格式
 
 2. **配置翻译**
    - 选择翻译方向（中文↔外语）
@@ -144,14 +143,11 @@ DocumentTranslator.exe
    - 配置翻译选项
 
 3. **选择AI引擎**
-   - RWKV：企业RWKV服务
+   - RWKV：本地RWKV模型服务
+   - LlamaCpp：本地LlamaCpp推理引擎
 
-4. **测试连接**
-   - 点击"🧪 测试连接"
-   - 确保引擎可用
-
-5. **开始翻译**
-   - 点击"🚀 开始翻译"
+4. **开始翻译**
+   - 点击"开始翻译"
    - 监控实时进度
 
 ### 高级功能
@@ -168,29 +164,26 @@ DocumentTranslator.exe
 
 ## 配置说明
 
-### API配置
-各AI引擎的配置文件位于 `API_config/` 目录：
-
-```
-API_config/
-└── rwkv_api.json   # RWKV配置
-```
-
-### 术语库配置
-术语库文件位于 `data/terminology.json`：
+### 应用配置
+主配置文件为 `config.json`：
 
 ```json
 {
-  "英语": {
-    "人工智能": "Artificial Intelligence",
-    "机器学习": "Machine Learning"
+  "rwkv_translator": {
+    "type": "rwkv",
+    "api_url": "http://127.0.0.1:8000/translate/v1/batch-translate",
+    "model": "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118"
   },
-  "日语": {
-    "人工智能": "人工知能",
-    "机器学习": "機械学習"
+  "local_model": {
+    "enabled": true,
+    "engine_directory": "rwkv_lightning_libtorch_win",
+    "models_directory": "rwkv_models"
   }
 }
 ```
+
+### 术语库配置
+术语库文件位于 `data/terminology.json` 和 `Windows/terminology.json`
 
 ## 故障排除
 
@@ -206,92 +199,107 @@ dotnet --list-runtimes
 # 如果缺少，请安装.NET 6.0 Runtime
 ```
 
-#### 2. Python脚本执行失败
-**症状**：翻译时报错"未找到Python可执行文件"
+#### 2. 翻译引擎无法连接
+**症状**：翻译时报错"无法连接到翻译引擎"
 **解决方案**：
 ```bash
-# 确保Python在PATH中
-python --version
-
-# 或者修改PythonBridge.cs中的Python路径
+# 确保本地模型服务已启动
+# 检查config.json中的api_url配置是否正确
+# 验证模型文件是否已正确下载
 ```
 
 #### 3. 翻译引擎连接失败
 **症状**：测试连接失败
 **解决方案**：
-- 检查API密钥配置
+- 检查API配置
 - 验证网络连接
 - 确认服务可用性
 
 ### 日志分析
-程序运行时会生成以下日志文件：
-- `translation.log`：Python翻译日志
-- `application.log`：C#应用程序日志
+程序运行时会生成翻译日志文件：
+- `translation_log_*.txt`：翻译过程日志
 
 ## 开发指南
 
 ### 项目结构
 ```
 RWKV_document-term-translator/
-├── DocumentTranslator.csproj      # 项目文件
-├── MainWindow.xaml               # 主窗口XAML
-├── MainWindow.xaml.cs            # 主窗口代码
-├── App.xaml                      # 应用程序XAML
-├── App.xaml.cs                   # 应用程序代码
-├── TranslationAssistantWindow.xaml   # 翻译助手窗口
-├── TranslationAssistantWindow.xaml.cs
-├── OutputConfigWindow.xaml       # 输出配置窗口
-├── OutputConfigWindow.xaml.cs
+├── DocumentTranslator.csproj           # 项目文件
+├── MainWindow.xaml/.cs                 # 主窗口
+├── TranslationAssistantWindow.xaml/.cs # 翻译助手窗口
+├── OutputConfigWindow.xaml/.cs         # 输出配置窗口
+├── App.xaml/.cs                        # 应用程序入口
+├── Program.cs                          # 程序入口点
+├── config.json                         # 应用配置（需自行配置）
+├── config_immersive_example.json       # 配置示例
 ├── Helpers/
-│   └── PathHelper.cs             # 路径辅助类
+│   └── PathHelper.cs                   # 路径辅助类
 ├── Windows/
-│   ├── EngineConfigWindow.xaml   # 引擎配置窗口
-│   ├── EngineConfigWindow.xaml.cs
-│   ├── ModelSelectWindow.xaml    # 模型选择窗口
-│   ├── ModelSelectWindow.xaml.cs
-│   ├── TerminologyEditorWindow.xaml  # 术语编辑器窗口
-│   ├── TerminologyEditorWindow.xaml.cs
-│   ├── TranslationRulesWindow.xaml   # 翻译规则窗口
-│   └── TranslationRulesWindow.xaml.cs
+│   ├── EngineConfigWindow.xaml/.cs     # 引擎配置窗口
+│   ├── ModelSelectWindow.xaml/.cs      # 模型选择窗口
+│   ├── TerminologyEditorWindow.xaml/.cs # 术语编辑窗口
+│   └── TranslationRulesWindow.xaml/.cs # 翻译规则窗口
 ├── services/
-│   ├── Translation/              # 翻译服务
-│   │   ├── BaseTranslator.cs
-│   │   ├── RWKVTranslator.cs
-│   │   ├── TranslationService.cs
-│   │   └── ...
-│   └── RwkvLocal/                # 本地RWKV服务
-├── llama_cpp/                    # llama_cpp推理引擎（需下载）
-│   ├── cpu/                      # CPU版本
-│   └── cuda/                     # CUDA版本
-├── config.json                   # 应用配置（需自行配置）
-├── config_immersive_example.json # 配置示例
-├── download_cpu.bat              # 下载CPU版llama_cpp脚本
-├── download_libtorch.bat         # 下载LibTorch脚本
-└── README_CSHARP.md              # 说明文档
+│   ├── Translation/                    # 翻译服务
+│   │   ├── BaseTranslator.cs           # 翻译器基类
+│   │   ├── RWKVTranslator.cs           # RWKV翻译器
+│   │   ├── LlamaCppTranslator.cs       # LlamaCpp翻译器
+│   │   ├── TranslationService.cs       # 翻译服务
+│   │   ├── DocumentProcessor.cs        # 文档处理器
+│   │   ├── TermExtractor.cs            # 术语提取器
+│   │   └── ...                         # 其他处理器
+│   └── RwkvLocal/                      # 本地推理服务
+│       └── LlamaCppProcessService.cs   # LlamaCpp进程管理
+├── data/
+│   └── terminology.json                # 术语库
+├── docs/                               # 文档
+├── tests/                              # 测试项目
+├── download_cpu.bat                    # 下载CPU版llama_cpp脚本
+├── download_libtorch.bat               # 下载LibTorch脚本
+└── README_CSHARP.md                    # 说明文档
 ```
 
 ### 重要说明
 
 #### 需要从外部下载的内容
-以下文件由于体积过大，不包含在Git仓库中，需要自行下载：
+以下文件由于体积过大或包含敏感信息，不包含在Git仓库中，需要自行下载或配置：
 
 1. **llama_cpp推理引擎**
    - 运行 `download_cpu.bat` 下载CPU版本
    - 或运行 `download_libtorch.bat` 下载CUDA版本
+   - 下载后放置在 `llama_cpp/` 目录
 
 2. **RWKV模型文件**
    - .safetensors格式的模型文件
    - 下载地址见"快速开始"部分
+   - 放置在 `rwkv_models/` 目录
 
 3. **LibTorch运行时**（如使用CUDA版本）
    - 运行 `download_libtorch.bat` 自动下载
+   - 或手动下载libtorch-win-shared-with-deps
+
+4. **配置文件**
+   - 复制 `config_immersive_example.json` 为 `config.json`
+   - 根据实际情况修改配置参数
+
+#### 不上传到GitHub的内容
+- `bin/` 和 `obj/`：编译输出
+- `llama_cpp/`：推理引擎二进制文件
+- `rwkv_models/`：模型文件
+- `libtorch-*/`：LibTorch运行时
+- `config.json` 和 `API_config/`：配置文件（可能包含敏感信息）
+- `data/terminology.json`：用户术语库
+- `*.db`：数据库文件
+- `*.log` 和 `translation_log_*.txt`：日志文件
+- `.trae/` 和 `.codebuddy/`：IDE配置
 
 ### 扩展开发
 
 #### 添加新的翻译引擎
-1. 在Python后端添加引擎支持
-2. 更新`PythonBridge.cs`中的引擎列表
-3. 在UI中添加对应的按钮和配置
+1. 在 `services/Translation/Translators/` 中创建新的翻译器类
+2. 继承 `BaseTranslator` 基类
+3. 实现必要的翻译接口
+4. 在UI中添加对应的配置选项
 
 #### 自定义界面主题
 1. 修改`App.xaml`中的全局样式

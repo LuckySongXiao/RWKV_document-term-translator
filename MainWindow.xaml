@@ -41,7 +41,8 @@
         <!-- 菜单栏 -->
         <Menu Grid.Row="0">
             <MenuItem Header="设置(_S)">
-                <MenuItem Header="RWKV设置" Click="OpenrwkvSettings"/>
+                <MenuItem Header="RWKV_lightning设置" Click="OpenrwkvSettings"/>
+                <MenuItem Header="llama_cpp设置" Click="OpenLlamaCppSettings"/>
             </MenuItem>
             <MenuItem Header="工具(_T)">
                 <MenuItem Header="翻译助手(_T)" Click="OpenTranslationAssistant"/>

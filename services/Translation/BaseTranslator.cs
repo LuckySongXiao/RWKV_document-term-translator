@@ -303,6 +303,22 @@ namespace DocumentTranslator.Services.Translation
             // 重新组合文本
             var filteredText = string.Join("\n", filteredLines);
 
+            // 剥离输出开头可能残留的语言代码前缀（如 "en:", "zh-CN:", "ja:" 等）
+            var langCodePrefixes = new[] { "zh-CN:", "zh-TW:", "zh:", "en:", "ja:", "ko:", "fr:", "de:", "es:", "ru:", "vi:", "pt:", "it:", "nl:", "ar:", "th:", "id:", "ms:", "tr:" };
+            var trimmedFiltered = filteredText.TrimStart();
+            foreach (var prefix in langCodePrefixes)
+            {
+                if (trimmedFiltered.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var afterPrefix = trimmedFiltered.Substring(prefix.Length).TrimStart(' ');
+                    if (!string.IsNullOrWhiteSpace(afterPrefix))
+                    {
+                        filteredText = afterPrefix;
+                    }
+                    break;
+                }
+            }
+
             // 外语→中文翻译模式下的额外过滤
             if (targetLang == "zh")
             {
@@ -569,19 +585,25 @@ namespace DocumentTranslator.Services.Translation
             if (string.IsNullOrWhiteSpace(translatedText))
                 return translatedText;
 
-            // 用户要求不再进行质量检测，直接返回译文
-            return translatedText;
-            
-            /*
-            // 检测译文质量
-            if (!IsQualityTranslation(originalText, translatedText, sourceLang, targetLang))
+            // 检测译文中是否包含原文内容（记录日志但不中断翻译）
+            if (ContainsOriginalText(originalText, translatedText))
             {
                 LogAbnormalTranslation(originalText, translatedText, sourceLang, targetLang);
-                throw new Exception("译文质量不佳，需要重新翻译");
+                _logger.LogWarning($"译文包含原文内容，源语言: {sourceLang}, 目标语言: {targetLang}, 原文: {originalText.Substring(0, Math.Min(30, originalText.Length))}...");
+            }
+
+            // 检测译文是否包含重复内容，如有则去重
+            if (IsDuplicateTranslation(translatedText))
+            {
+                var deduplicated = RemoveDuplicateContent(translatedText);
+                if (!string.IsNullOrWhiteSpace(deduplicated) && deduplicated.Length < translatedText.Length * 0.8)
+                {
+                    _logger.LogWarning($"检测到重复译文，已去重。原文长度: {translatedText.Length}, 去重后长度: {deduplicated.Length}");
+                    translatedText = deduplicated;
+                }
             }
 
             return translatedText;
-            */
         }
 
         /// <summary>
@@ -987,5 +1009,174 @@ namespace DocumentTranslator.Services.Translation
         {
             // 基类默认不需要释放资源
         }
+
+        #region 翻译前检查
+
+        /// <summary>
+        /// 判断是否为中文字符
+        /// </summary>
+        protected static bool IsChinese(char c)
+        {
+            return c >= 0x4E00 && c <= 0x9FFF;
+        }
+
+        /// <summary>
+        /// 判断文本是否应跳过翻译（纯数字、纯编码等）
+        /// </summary>
+        protected bool ShouldSkipTranslation(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return true;
+
+            var trimmed = text.Trim();
+
+            if (trimmed.Length == 0)
+                return true;
+
+            var digitCount = 0;
+            var letterCount = 0;
+            var chineseCount = 0;
+            var otherCount = 0;
+
+            foreach (char c in trimmed)
+            {
+                if (char.IsDigit(c))
+                {
+                    digitCount++;
+                }
+                else if (char.IsLetter(c))
+                {
+                    if (IsChinese(c))
+                    {
+                        chineseCount++;
+                    }
+                    else
+                    {
+                        letterCount++;
+                    }
+                }
+                else
+                {
+                    otherCount++;
+                }
+            }
+
+            var totalChars = trimmed.Length;
+
+            if (digitCount == totalChars)
+            {
+                _logger.LogInformation($"检测到纯数字文本: '{trimmed}'");
+                return true;
+            }
+
+            if (digitCount + otherCount == totalChars)
+            {
+                _logger.LogInformation($"检测到纯数字/编码文本: '{trimmed}'");
+                return true;
+            }
+
+            if (letterCount == totalChars && IsPureCode(trimmed))
+            {
+                _logger.LogInformation($"检测到纯编码文本: '{trimmed}'");
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 判断文本是否为纯代码标识符
+        /// </summary>
+        private static bool IsPureCode(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var trimmed = text.Trim();
+
+            if (trimmed.Length < 2)
+                return false;
+
+            var consecutiveLetterCount = 0;
+            var maxConsecutiveLetters = 0;
+
+            foreach (char c in trimmed)
+            {
+                if (char.IsLetter(c) && !IsChinese(c))
+                {
+                    consecutiveLetterCount++;
+                    maxConsecutiveLetters = Math.Max(maxConsecutiveLetters, consecutiveLetterCount);
+                }
+                else
+                {
+                    consecutiveLetterCount = 0;
+                }
+            }
+
+            var hasMultipleConsecutiveLetters = maxConsecutiveLetters >= 2;
+
+            var hasSpecialChars = false;
+            foreach (char c in trimmed)
+            {
+                if (c == '_' || c == '-' || c == '.' || c == ':' || c == '/' || c == '\\')
+                {
+                    hasSpecialChars = true;
+                    break;
+                }
+            }
+
+            var hasDigits = trimmed.Any(char.IsDigit);
+
+            return hasMultipleConsecutiveLetters && (hasSpecialChars || hasDigits);
+        }
+
+        /// <summary>
+        /// 根据源语言字符比例判断是否需要翻译
+        /// </summary>
+        protected bool ShouldTranslateBasedOnLanguageRatio(string text, string sourceLang)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var trimmed = text.Trim();
+
+            if (trimmed.Length == 0)
+                return false;
+
+            var isZhSource = sourceLang == "zh" || sourceLang == "zh-cn" || sourceLang == "auto";
+
+            var chineseCount = 0;
+            var nonChineseCount = 0;
+
+            foreach (char c in trimmed)
+            {
+                if (IsChinese(c))
+                {
+                    chineseCount++;
+                }
+                else if (char.IsLetter(c) || char.IsDigit(c))
+                {
+                    nonChineseCount++;
+                }
+            }
+
+            var totalChars = chineseCount + nonChineseCount;
+
+            if (totalChars == 0)
+                return false;
+
+            if (isZhSource)
+            {
+                var chineseRatio = (double)chineseCount / totalChars;
+                return chineseRatio >= 0.2;
+            }
+            else
+            {
+                var nonChineseRatio = (double)nonChineseCount / totalChars;
+                return nonChineseRatio >= 0.2;
+            }
+        }
+
+        #endregion
     }
 }

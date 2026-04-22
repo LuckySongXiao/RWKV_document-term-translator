@@ -61,7 +61,8 @@ namespace DocumentTranslator.Services.RwkvLocal
         /// <param name="gpu">GPU信息</param>
         /// <param name="toolName">工具名称（llama-cuda, llama-cpu, llama-vulkan）</param>
         /// <param name="preferredPort">首选端口</param>
-        public async Task<bool> StartAsync(ModelInfo model, GpuInfo? gpu, string toolName = "llama-cuda", int? preferredPort = null)
+        /// <param name="chatTemplate">对话模板名称（如 rwkv-world、chatml、llama3），默认 rwkv-world</param>
+        public async Task<bool> StartAsync(ModelInfo model, GpuInfo? gpu, string toolName = "llama-cuda", int? preferredPort = null, string chatTemplate = null)
         {
             if (Status.State == ServiceState.Running || Status.State == ServiceState.Starting)
             {
@@ -114,14 +115,15 @@ namespace DocumentTranslator.Services.RwkvLocal
 
                 // 构建 llama-server 启动参数
                 // llama-server 提供 OpenAI 兼容 API
-                // --chat-template rwkv-world: RWKV模型专用聊天模板
+                // --chat-template: 对话模板（如 rwkv-world、chatml、llama3）
+                var effectiveChatTemplate = string.IsNullOrWhiteSpace(chatTemplate) ? "rwkv-world" : chatTemplate;
                 var arguments = $"-m \"{safeModelPath}\" " +
                                $"--port {Status.Port} " +
                                $"--host 127.0.0.1 " +
                                $"-c 8192 " +                       // 上下文长度
                                $"-t 4 " +                          // 线程数
                                $"--parallel 4 " +                  // 并行请求数
-                               $"--chat-template rwkv-world";      // RWKV专用聊天模板
+                               $"--chat-template {effectiveChatTemplate}";  // 对话模板
 
                 // GPU卸载层数设置
                 if ((toolName == "llama-cuda" || toolName == "llama-sycl" || toolName == "llama-vulkan") && gpu != null)

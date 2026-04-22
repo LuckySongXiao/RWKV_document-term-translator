@@ -28,8 +28,8 @@ namespace DocumentTranslator
 
         private void InitializeEngineComboBox()
         {
-            _translationService.CurrentTranslatorType = "rwkv";
-            _logger.LogInformation("使用RWKV引擎");
+            // 保持当前翻译器类型不变（可能是 rwkv 或 llama_cpp）
+            _logger.LogInformation($"使用当前引擎: {_translationService.CurrentTranslatorType}");
         }
 
         private void LoadTerminology()

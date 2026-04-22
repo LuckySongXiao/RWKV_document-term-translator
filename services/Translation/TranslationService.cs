@@ -176,6 +176,7 @@ namespace DocumentTranslator.Services.Translation
                 ITranslator translator = translatorType switch
                 {
                     "rwkv" => InitializeRWKVTranslator(),
+                    "llama_cpp" => InitializeLlamaCppTranslator(),
                     _ => null
                 };
 
@@ -216,6 +217,7 @@ namespace DocumentTranslator.Services.Translation
                 ITranslator translator = translatorType switch
                 {
                     "rwkv" => InitializeRWKVTranslator(preferredModel),
+                    "llama_cpp" => InitializeLlamaCppTranslator(preferredModel),
                     _ => null
                 };
 
@@ -279,6 +281,13 @@ namespace DocumentTranslator.Services.Translation
                 if (rwkvTranslator != null)
                 {
                     _translators["rwkv"] = rwkvTranslator;
+                }
+
+                // 初始化LlamaCpp翻译器
+                var llamaCppTranslator = InitializeLlamaCppTranslator();
+                if (llamaCppTranslator != null)
+                {
+                    _translators["llama_cpp"] = llamaCppTranslator;
                 }
 
                 _logger.LogInformation($"已初始化 {_translators.Count} 个翻译器");
@@ -346,12 +355,7 @@ namespace DocumentTranslator.Services.Translation
 
                     _logger.LogInformation($"初始化RWKV翻译器，使用模型: {model}, API: {apiUrl}, 批量翻译模式: {useBatchTranslate}, 并发数: {maxConcurrency}");
                     
-                    // 判断是否为llama.cpp推理服务（URL包含/v1/chat/completions或端口为8080）
-                    var isLlamaCpp = apiUrl.Contains("/v1/chat/completions", StringComparison.OrdinalIgnoreCase) ||
-                                     apiUrl.Contains("/v1/completions", StringComparison.OrdinalIgnoreCase) ||
-                                     (apiUrl.Contains(":8080") && !apiUrl.Contains("/translate/"));
-                    
-                    var translator = new RWKVTranslator(_logger, apiUrl, model, timeout, apiKey, useBatchTranslate, maxConcurrency, isLlamaCpp);
+                    var translator = new RWKVTranslator(_logger, apiUrl, model, timeout, apiKey, useBatchTranslate, maxConcurrency);
                     RWKVTranslator.GetMaxConcurrency = GetEffectiveMaxParallelism;
                     return translator;
                 }
@@ -365,6 +369,87 @@ namespace DocumentTranslator.Services.Translation
                 _logger.LogError(ex, "初始化RWKV翻译器失败");
             }
             return null;
+        }
+
+        /// <summary>
+        /// 初始化LlamaCpp翻译器
+        /// </summary>
+        private ITranslator InitializeLlamaCppTranslator(string preferredModel = null)
+        {
+            try
+            {
+                var llamaConfig = GetConfig("llama_cpp_translator") as Dictionary<string, object> ?? new Dictionary<string, object>();
+                var apiUrl = llamaConfig.GetValueOrDefault("api_url", "").ToString();
+                var apiKey = llamaConfig.GetValueOrDefault("api_key", "").ToString();
+                var modelFromConfig = llamaConfig.GetValueOrDefault("model", "").ToString();
+                var timeoutFromConfig = Convert.ToInt32(llamaConfig.GetValueOrDefault("timeout", 120));
+                var modeStr = llamaConfig.GetValueOrDefault("mode", "completions").ToString();
+                var maxConcurrency = GetEffectiveMaxParallelism();
+
+                // 默认API地址（续写模式使用 /v1/completions）
+                if (string.IsNullOrWhiteSpace(apiUrl))
+                {
+                    apiUrl = "http://127.0.0.1:8080/v1/completions";
+                    _logger.LogInformation("使用内置默认LlamaCpp API地址: {ApiUrl}", apiUrl);
+                }
+
+                var mode = modeStr.Equals("completions", StringComparison.OrdinalIgnoreCase)
+                    ? Translators.LlamaCppTranslator.LlamaCppMode.Completions
+                    : Translators.LlamaCppTranslator.LlamaCppMode.Chat;
+
+                var model = preferredModel ?? modelFromConfig;
+
+                // 读取翻译规则配置
+                var eosToken = "";
+                var langSeparators = new Dictionary<string, string>();
+
+                var translationRules = llamaConfig.GetValueOrDefault("translation_rules", null);
+                if (translationRules is Dictionary<string, object> rules)
+                {
+                    eosToken = rules.GetValueOrDefault("eos_token", "").ToString();
+
+                    // 读取语言分隔符，将 \n 转义序列转换为实际换行符
+                    var enSep = UnescapeNewlines(rules.GetValueOrDefault("en_separator", "\\n\\nEnglish").ToString());
+                    var zhSep = UnescapeNewlines(rules.GetValueOrDefault("zh_separator", "\\n\\nChinese").ToString());
+                    var jaSep = UnescapeNewlines(rules.GetValueOrDefault("ja_separator", "\\n\\nJapanese").ToString());
+
+                    if (!string.IsNullOrEmpty(enSep)) langSeparators["en"] = enSep;
+                    if (!string.IsNullOrEmpty(zhSep)) langSeparators["zh"] = zhSep;
+                    if (!string.IsNullOrEmpty(jaSep)) langSeparators["ja"] = jaSep;
+                }
+                else if (translationRules is Newtonsoft.Json.Linq.JObject jRules)
+                {
+                    eosToken = jRules.Value<string>("eos_token") ?? "";
+
+                    var enSep = UnescapeNewlines(jRules.Value<string>("en_separator") ?? "\\n\\nEnglish");
+                    var zhSep = UnescapeNewlines(jRules.Value<string>("zh_separator") ?? "\\n\\nChinese");
+                    var jaSep = UnescapeNewlines(jRules.Value<string>("ja_separator") ?? "\\n\\nJapanese");
+
+                    if (!string.IsNullOrEmpty(enSep)) langSeparators["en"] = enSep;
+                    if (!string.IsNullOrEmpty(zhSep)) langSeparators["zh"] = zhSep;
+                    if (!string.IsNullOrEmpty(jaSep)) langSeparators["ja"] = jaSep;
+                }
+
+                _logger.LogInformation($"初始化LlamaCpp翻译器，模型: {model}, API: {apiUrl}, 模式: {mode}, 并发数: {maxConcurrency}, EOS: '{eosToken}', 语言分隔符数: {langSeparators.Count}");
+
+                var translator = new Translators.LlamaCppTranslator(_logger, apiUrl, model, timeoutFromConfig, apiKey, maxConcurrency, mode, eosToken, langSeparators);
+                Translators.LlamaCppTranslator.GetMaxConcurrency = GetEffectiveMaxParallelism;
+                return translator;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "初始化LlamaCpp翻译器失败");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 将 \n 转义序列转换为实际换行符
+        /// </summary>
+        private static string UnescapeNewlines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            return text.Replace("\\n", "\n");
         }
 
         /// <summary>

@@ -38,12 +38,12 @@
         <!-- 配置选项卡 -->
         <TabControl Grid.Row="1" Margin="10">
 
-            <!-- RWKV配置 -->
-            <TabItem Header="🤖 RWKV">
+            <!-- RWKV_lightning配置 -->
+            <TabItem Header="🤖 RWKV_lightning">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <Border Style="{StaticResource ConfigCardStyle}">
                         <StackPanel>
-                            <TextBlock Text="RWKV配置" Style="{StaticResource ConfigHeaderStyle}"/>
+                            <TextBlock Text="RWKV_lightning配置" Style="{StaticResource ConfigHeaderStyle}"/>
 
                             <TextBlock Text="API地址" FontWeight="Bold" Margin="0,5"/>
                             <ComboBox x:Name="rwkvApiUrl" Height="35" Margin="0,2,0,10" IsEditable="True">
@@ -68,6 +68,72 @@
                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                 <Button Content="🧪 测试连接" Click="TestrwkvConnection" Width="100" Margin="0,0,10,0"/>
                                 <Button Content="💾 保存配置" Click="SaverwkvConfig" Width="100"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- llama_cpp配置 -->
+            <TabItem Header="🦙 llama_cpp">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Border Style="{StaticResource ConfigCardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="llama_cpp配置" Style="{StaticResource ConfigHeaderStyle}"/>
+
+                            <!-- API接口设置 -->
+                            <TextBlock Text="API接口设置" FontWeight="Bold" FontSize="13" Foreground="#3498DB" Margin="0,0,0,8"/>
+
+                            <TextBlock Text="API地址" FontWeight="Bold" Margin="0,5"/>
+                            <ComboBox x:Name="llamaCppApiUrl" Height="35" Margin="0,2,0,10" IsEditable="True">
+                                <ComboBoxItem Content="http://127.0.0.1:8080/v1/completions"/>
+                                <ComboBoxItem Content="http://127.0.0.1:8080/v1/chat/completions"/>
+                            </ComboBox>
+
+                            <TextBlock Text="推理模式" FontWeight="Bold" Margin="0,5"/>
+                            <ComboBox x:Name="llamaCppMode" Height="35" Margin="0,2,0,10">
+                                <ComboBoxItem Content="Completions (续写模式)" Tag="completions"/>
+                                <ComboBoxItem Content="Chat (对话模式)" Tag="chat"/>
+                            </ComboBox>
+
+                            <TextBlock Text="对话模板 (chat-template)" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppChatTemplate" Text="rwkv-world" Height="35" Margin="0,2,0,10"/>
+                            <TextBlock Text="llama-server启动时使用的 --chat-template 参数，如 rwkv-world、chatml、llama3 等" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <TextBlock Text="超时时间 (秒)" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppTimeout" Text="120" Height="35" Margin="0,2,0,10"/>
+
+                            <!-- 翻译规则设置 -->
+                            <TextBlock Text="翻译规则设置 (RWKV官方续写格式)" FontWeight="Bold" FontSize="13" Foreground="#3498DB" Margin="0,10,0,8"/>
+                            <TextBlock Text="参考: https://www.rwkv.cn/docs/RWKV-Prompts/Completion-Prompts" 
+                                       FontSize="11" Foreground="#3498DB" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                            <TextBlock Text="官方格式: {语言全名}: + 换行 + {文本} + 换行 + {目标语言全名}:" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <TextBlock Text="EOS停止符号" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppEosToken" Text="" Height="35" Margin="0,2,0,5"/>
+                            <TextBlock Text="模型生成遇到此符号时停止，留空则使用模型默认EOS" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <TextBlock Text="翻译英文时的分隔符" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppEnSeparator" Text="\n\nEnglish" Height="35" Margin="0,2,0,5"/>
+                            <TextBlock Text="prompt中目标语言前缀（默认 \n\nEnglish，即换两行后写 English:）" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <TextBlock Text="翻译中文时的分隔符" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppZhSeparator" Text="\n\nChinese" Height="35" Margin="0,2,0,5"/>
+                            <TextBlock Text="prompt中目标语言前缀（默认 \n\nChinese，即换两行后写 Chinese:）" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <TextBlock Text="翻译日语时的分隔符" FontWeight="Bold" Margin="0,5"/>
+                            <TextBox x:Name="llamaCppJaSeparator" Text="\n\nJapanese" Height="35" Margin="0,2,0,5"/>
+                            <TextBlock Text="prompt中目标语言前缀（默认 \n\nJapanese，即换两行后写 Japanese:）" 
+                                       FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                <Button Content="🧪 测试连接" Click="TestLlamaCppConnection" Width="100" Margin="0,0,10,0"/>
+                                <Button Content="💾 保存配置" Click="SaveLlamaCppConfig" Width="100"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>

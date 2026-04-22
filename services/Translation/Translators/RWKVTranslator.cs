@@ -24,7 +24,6 @@ namespace DocumentTranslator.Services.Translation.Translators
         private readonly int _timeout;
         private readonly string _apiKey;
         private readonly bool _useBatchTranslate;
-        private readonly bool _isLlamaCpp;  // 是否使用llama.cpp推理（续写接口）
         private readonly HttpClient _httpClient;
         private static System.Threading.SemaphoreSlim _globalRequestSemaphore;
         private static readonly object _semaphoreLock = new object();
@@ -76,28 +75,18 @@ namespace DocumentTranslator.Services.Translation.Translators
                 }
             }
 
-            // 第二步：基于基础地址拼接API路径
-            if (_isLlamaCpp)
-            {
-                // llama.cpp 使用续写接口做翻译
-                return u + "/v1/completions";
-            }
-            else
-            {
-                // rwkv_lightning 使用translate模式
-                return u + "/translate/v1/batch-translate";
-            }
+            // 第二步：基于基础地址拼接API路径（rwkv_lightning 使用translate模式）
+            return u + "/translate/v1/batch-translate";
         }
 
         public RWKVTranslator(ILogger logger, string apiUrl, string model = "RWKV_v7_G1c_1.5B_Translate_ctx4096_20260118", 
-            int timeout = 60, string apiKey = null, bool useBatchTranslate = true, int maxConcurrency = 30, bool isLlamaCpp = false)
+            int timeout = 60, string apiKey = null, bool useBatchTranslate = true, int maxConcurrency = 30)
             : base(logger)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _timeout = timeout;
             _apiKey = apiKey ?? string.Empty;
-            _isLlamaCpp = isLlamaCpp;
-            _useBatchTranslate = isLlamaCpp ? false : true; // llama.cpp使用续写接口，rwkv使用translate模式
+            _useBatchTranslate = useBatchTranslate;
 
             lock (_semaphoreLock)
             {
@@ -413,12 +402,6 @@ namespace DocumentTranslator.Services.Translation.Translators
 
         private async Task<IReadOnlyList<string>> TranslateWithBatchApiAsync(IReadOnlyList<string> promptTexts, string sourceLang, string targetLang)
         {
-            // llama.cpp 使用续写接口(/v1/completions)做翻译
-            if (_isLlamaCpp)
-            {
-                return await TranslateWithCompletionApiAsync(promptTexts, sourceLang, targetLang);
-            }
-
             // rwkv_lightning 使用批量翻译接口
             var requestData = new
             {
@@ -510,97 +493,6 @@ namespace DocumentTranslator.Services.Translation.Translators
             }
 
             throw new Exception($"RWKV批量翻译在 {maxRetries} 次尝试后仍然失败");
-        }
-
-        /// <summary>
-        /// 使用llama.cpp续写接口(/v1/completions)做翻译
-        /// 构造翻译prompt，调用续写API获取翻译结果
-        /// </summary>
-        private async Task<IReadOnlyList<string>> TranslateWithCompletionApiAsync(IReadOnlyList<string> promptTexts, string sourceLang, string targetLang)
-        {
-            var completionApiUrl = GetBatchApiUrl(); // 已被Normalize为/v1/completions
-            var results = new List<string>();
-
-            var sourceCode = GetLanguageCode(sourceLang);
-            var targetCode = GetLanguageCode(targetLang);
-
-            foreach (var text in promptTexts)
-            {
-                // 构造翻译prompt：使用RWKV-world格式的翻译指令
-                var prompt = $"Translate the following text from {sourceCode} to {targetCode}. Only output the translation, nothing else.\n\n{text}\n\nTranslation:";
-
-                var requestData = new Dictionary<string, object>
-                {
-                    ["prompt"] = prompt,
-                    ["max_tokens"] = 2048,
-                    ["temperature"] = 0.3,
-                    ["top_p"] = 0.95,
-                    ["stream"] = false,
-                    ["stop"] = new[] { "\n\n\n", "User:" }
-                };
-
-                int maxRetries = 3;
-                int retryDelayMs = 2000;
-                string translation = null;
-
-                for (int attempt = 0; attempt < maxRetries; attempt++)
-                {
-                    try
-                    {
-                        var jsonContent = JsonConvert.SerializeObject(requestData);
-                        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-                        var response = await _httpClient.PostAsync(completionApiUrl, content);
-
-                        if (!response.IsSuccessStatusCode)
-                        {
-                            var errorContent = await response.Content.ReadAsStringAsync();
-                            var statusCode = (int)response.StatusCode;
-
-                            if (statusCode >= 500 && attempt < maxRetries - 1)
-                            {
-                                _logger.LogWarning($"llama.cpp续写API服务器错误(尝试 {attempt + 1}/{maxRetries})，状态码: {response.StatusCode}");
-                                await Task.Delay(retryDelayMs);
-                                retryDelayMs *= 2;
-                                continue;
-                            }
-
-                            throw new Exception($"llama.cpp续写API请求失败 HTTP {statusCode}: {errorContent}");
-                        }
-
-                        var responseJson = await response.Content.ReadAsStringAsync();
-                        var responseData = JObject.Parse(responseJson);
-
-                        // 解析续写响应: {"choices":[{"text":"翻译结果",...}]}
-                        var choice = responseData["choices"]?[0];
-                        var rawText = choice?["text"]?.ToString()?.Trim() ?? string.Empty;
-
-                        translation = FilterOutput(rawText, sourceLang, targetLang);
-                        if (string.IsNullOrWhiteSpace(translation))
-                        {
-                            translation = rawText;
-                        }
-
-                        break; // 成功，退出重试循环
-                    }
-                    catch (Exception ex) when (attempt < maxRetries - 1)
-                    {
-                        _logger.LogWarning(ex, $"llama.cpp续写翻译失败(尝试 {attempt + 1}/{maxRetries})");
-                        await Task.Delay(retryDelayMs);
-                        retryDelayMs *= 2;
-                    }
-                }
-
-                if (translation == null)
-                {
-                    throw new Exception($"llama.cpp续写翻译在 {maxRetries} 次尝试后仍然失败");
-                }
-
-                results.Add(translation);
-            }
-
-            _logger.LogInformation($"llama.cpp续写翻译成功，批大小: {promptTexts.Count}，URL: {completionApiUrl}");
-            return results;
         }
 
         private async Task<string> TranslateWithBatchApiAsync(string promptText, string sourceLang, string targetLang)
@@ -820,11 +712,6 @@ namespace DocumentTranslator.Services.Translation.Translators
             base.Dispose(disposing);
         }
 
-        private bool IsChinese(char c)
-        {
-            return c >= 0x4E00 && c <= 0x9FFF;
-        }
-
         private string ReplaceTermsInText(string text, Dictionary<string, string> terms, bool isCnToForeign)
         {
             if (string.IsNullOrWhiteSpace(text) || terms == null || !terms.Any())
@@ -950,155 +837,6 @@ namespace DocumentTranslator.Services.Translation.Translators
             _logger?.LogDebug($"术语预处理完成，原文长度: {text.Length}，处理后长度: {result.Length}");
 
             return result;
-        }
-
-        private bool ShouldSkipTranslation(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return true;
-
-            var trimmed = text.Trim();
-
-            if (trimmed.Length == 0)
-                return true;
-
-            var digitCount = 0;
-            var letterCount = 0;
-            var chineseCount = 0;
-            var otherCount = 0;
-
-            foreach (char c in trimmed)
-            {
-                if (char.IsDigit(c))
-                {
-                    digitCount++;
-                }
-                else if (char.IsLetter(c))
-                {
-                    if (IsChinese(c))
-                    {
-                        chineseCount++;
-                    }
-                    else
-                    {
-                        letterCount++;
-                    }
-                }
-                else
-                {
-                    otherCount++;
-                }
-            }
-
-            var totalChars = trimmed.Length;
-
-            if (digitCount == totalChars)
-            {
-                _logger.LogInformation($"检测到纯数字文本: '{trimmed}'");
-                return true;
-            }
-
-            if (digitCount + otherCount == totalChars)
-            {
-                _logger.LogInformation($"检测到纯数字/编码文本: '{trimmed}'");
-                return true;
-            }
-
-            if (letterCount == totalChars && IsPureCode(trimmed))
-            {
-                _logger.LogInformation($"检测到纯编码文本: '{trimmed}'");
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool IsPureCode(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return false;
-
-            var trimmed = text.Trim();
-
-            if (trimmed.Length < 2)
-                return false;
-
-            var hasMultipleConsecutiveLetters = false;
-            var consecutiveLetterCount = 0;
-            var maxConsecutiveLetters = 0;
-
-            foreach (char c in trimmed)
-            {
-                if (char.IsLetter(c) && !IsChinese(c))
-                {
-                    consecutiveLetterCount++;
-                    maxConsecutiveLetters = Math.Max(maxConsecutiveLetters, consecutiveLetterCount);
-                }
-                else
-                {
-                    consecutiveLetterCount = 0;
-                }
-            }
-
-            hasMultipleConsecutiveLetters = maxConsecutiveLetters >= 2;
-
-            var hasSpecialChars = false;
-            foreach (char c in trimmed)
-            {
-                if (c == '_' || c == '-' || c == '.' || c == ':' || c == '/' || c == '\\')
-                {
-                    hasSpecialChars = true;
-                    break;
-                }
-            }
-
-            var hasDigits = trimmed.Any(char.IsDigit);
-
-            return hasMultipleConsecutiveLetters && (hasSpecialChars || hasDigits);
-        }
-
-        private bool ShouldTranslateBasedOnLanguageRatio(string text, string sourceLang)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return false;
-
-            var trimmed = text.Trim();
-
-            if (trimmed.Length == 0)
-                return false;
-
-            var isZhSource = sourceLang == "zh" || sourceLang == "zh-cn" || sourceLang == "auto";
-
-            var chineseCount = 0;
-            var nonChineseCount = 0;
-
-            foreach (char c in trimmed)
-            {
-                if (IsChinese(c))
-                {
-                    chineseCount++;
-                }
-                else if (char.IsLetter(c) || char.IsDigit(c))
-                {
-                    nonChineseCount++;
-                }
-            }
-
-            var totalChars = chineseCount + nonChineseCount;
-
-            if (totalChars == 0)
-                return false;
-
-            if (isZhSource)
-            {
-                var chineseRatio = (double)chineseCount / totalChars;
-                return chineseRatio >= 0.2;
-            }
-            else
-            {
-                var nonChineseRatio = (double)nonChineseCount / totalChars;
-                return nonChineseRatio >= 0.2;
-            }
         }
     }
 }
