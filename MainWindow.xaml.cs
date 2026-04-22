@@ -64,6 +64,9 @@ namespace DocumentTranslator
 
         // 当前使用的推理工具名称
         private string _currentToolName = "rwkv_lightning";
+        
+        // 防止 SelectionChanged 事件递归调用
+        private bool _suppressToolSelectionEvents = false;
 
         // GGUF模型默认下载地址
         private const string DefaultGgufModelScopeUrl = "https://www.modelscope.cn/models/shoumenchougou/RWKV7-G1e-1.5B-GGUF/files";
@@ -216,7 +219,7 @@ namespace DocumentTranslator
                     _benchmarkCache = new ModelBenchmarkCache(_logger);
                     _concurrencyCalculator = new ConcurrencyCalculator(_logger, _gpuResourceService, _modelManagementService, _benchmarkCache);
                     _rwkvProcessService = new RwkvProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
-                    _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService);
+                    _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
                     _modelConverter = new ModelConverter(_logger);
                     _modelDownloadService = new ModelDownloadService(_logger);
                 });
@@ -255,7 +258,7 @@ namespace DocumentTranslator
                 _benchmarkCache = new ModelBenchmarkCache(_logger);
                 _concurrencyCalculator = new ConcurrencyCalculator(_logger, _gpuResourceService, _modelManagementService, _benchmarkCache);
                 _rwkvProcessService = new RwkvProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
-                _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService);
+                _llamaCppProcessService = new LlamaCppProcessService(_logger, _modelManagementService, _gpuResourceService, _concurrencyCalculator);
                 _modelConverter = new ModelConverter(_logger);
                 _modelDownloadService = new ModelDownloadService(_logger);
 
@@ -292,29 +295,43 @@ namespace DocumentTranslator
                 
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    GpuSelectorCombo.Items.Clear();
-                    if (_availableGpus.Count > 0)
+                    // 抑制事件，防止初始化期间触发递归
+                    _suppressToolSelectionEvents = true;
+                    try
                     {
-                        foreach (var gpu in _availableGpus)
+                        GpuSelectorCombo.Items.Clear();
+                        if (_availableGpus.Count > 0)
                         {
-                            GpuSelectorCombo.Items.Add(new ComboBoxItem 
-                            { 
-                                Content = gpu.DisplayName, 
-                                Tag = gpu 
-                            });
+                            foreach (var gpu in _availableGpus)
+                            {
+                                GpuSelectorCombo.Items.Add(new ComboBoxItem 
+                                { 
+                                    Content = gpu.DisplayName, 
+                                    Tag = gpu 
+                                });
+                            }
+                            GpuSelectorCombo.SelectedIndex = 0;
+                            LogMessage($"🎮 检测到 {_availableGpus.Count} 个NVIDIA GPU");
+                            
+                            // 显示GPU显存信息
+                            var firstGpu = _availableGpus[0];
+                            GpuMemoryText.Text = $"显存: {firstGpu.UsedMemoryGB:F2}/{firstGpu.TotalMemoryGB:F1}GB";
                         }
-                        GpuSelectorCombo.SelectedIndex = 0;
-                        LogMessage($"🎮 检测到 {_availableGpus.Count} 个NVIDIA GPU");
+                        else
+                        {
+                            GpuSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未检测到NVIDIA GPU" });
+                            GpuSelectorCombo.SelectedIndex = 0;
+                            LogMessage("⚠️ 未检测到NVIDIA GPU，已自动切换到CPU模式");
+                            // 无GPU时自动切换到CPU模式
+                            ComputeModeCombo.SelectedIndex = 1; // CPU
+                        }
                         
-                        // 显示GPU显存信息
-                        var firstGpu = _availableGpus[0];
-                        GpuMemoryText.Text = $"显存: {firstGpu.UsedMemoryGB:F2}/{firstGpu.TotalMemoryGB:F1}GB";
+                        // 初始化推理工具列表
+                        RefreshInferenceTools();
                     }
-                    else
+                    finally
                     {
-                        GpuSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未检测到NVIDIA GPU" });
-                        GpuSelectorCombo.SelectedIndex = 0;
-                        LogMessage("⚠️ 未检测到NVIDIA GPU，本地推理功能不可用");
+                        _suppressToolSelectionEvents = false;
                     }
                 });
 
@@ -490,8 +507,7 @@ namespace DocumentTranslator
             {
                 // 获取选择的推理工具
                 var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
-                var selectedToolContent = selectedToolItem?.Content as string ?? "";
-                var toolName = ResolveToolName(selectedToolContent);
+                var toolName = selectedToolItem?.Tag as string ?? ResolveToolName(selectedToolItem?.Content as string ?? "");
                 _currentToolName = toolName;
                 var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
 
@@ -522,21 +538,26 @@ namespace DocumentTranslator
                     return;
                 }
 
-                // 获取选中的GPU
-                var selectedGpuItem = GpuSelectorCombo.SelectedItem as ComboBoxItem;
-                var selectedGpu = selectedGpuItem?.Tag as GpuInfo;
+                // 获取选中的GPU（仅GPU模式需要）
+                GpuInfo? selectedGpu = null;
+                var isGpuMode = IsGpuComputeMode();
                 
-                if (selectedGpu == null && _availableGpus.Count > 0)
+                if (isGpuMode)
                 {
-                    selectedGpu = _availableGpus[0];
-                }
-
-                // llama-cpu 不需要GPU
-                if (selectedGpu == null && toolName != "llama-cpu")
-                {
-                    LogMessage("❌ 未选择GPU");
-                    MessageBox.Show("请选择一个GPU", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
+                    var selectedGpuItem = GpuSelectorCombo.SelectedItem as ComboBoxItem;
+                    selectedGpu = selectedGpuItem?.Tag as GpuInfo;
+                    
+                    if (selectedGpu == null && _availableGpus.Count > 0)
+                    {
+                        selectedGpu = _availableGpus[0];
+                    }
+                    
+                    if (selectedGpu == null)
+                    {
+                        LogMessage("❌ 未选择GPU");
+                        MessageBox.Show("请选择一个GPU", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
                 }
 
                 // 检查模型是否需要转换
@@ -573,7 +594,21 @@ namespace DocumentTranslator
 
                     // 读取配置的对话模板
                     var chatTemplate = GetLlamaCppChatTemplate();
-                    var success = await _llamaCppProcessService.StartAsync(selectedModel, selectedGpu, toolName, chatTemplate: chatTemplate);
+                    
+                    // 获取 BSZ 测试选项和增量值
+                    bool enableBszTest = EnableBszTestCheck.IsChecked == true;
+                    int bszIncrement = 10;
+                    if (int.TryParse(BszIncrementText.Text, out int parsedIncrement) && parsedIncrement > 0)
+                    {
+                        bszIncrement = parsedIncrement;
+                    }
+
+                    if (enableBszTest)
+                    {
+                        LogMessage($"🧪 已启用 BSZ 上限测试，增量值: {bszIncrement}");
+                    }
+
+                    var success = await _llamaCppProcessService.StartAsync(selectedModel, selectedGpu, toolName, chatTemplate: chatTemplate, enableBszTest: enableBszTest, bszIncrement: bszIncrement);
 
                     if (success)
                     {
@@ -2033,50 +2068,157 @@ namespace DocumentTranslator
 
         /// <summary>
         /// 推理工具选择变化时，自动切换ModelScope下载地址
+        /// <summary>
+        /// 计算方式选择变化时，过滤推理工具列表并显示/隐藏GPU选择
         /// </summary>
-        private void InferenceToolCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void ComputeModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            // 防止递归调用或服务未初始化
+            if (_suppressToolSelectionEvents || _gpuResourceService == null) return;
+            
             try
             {
-                var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
-                var selectedToolContent = selectedToolItem?.Content as string ?? "";
-                var toolName = ResolveToolName(selectedToolContent);
-                _currentToolName = toolName;
-                var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+                var isGpuMode = IsGpuComputeMode();
+                
+                // 显示/隐藏GPU选择面板
+                GpuSelectPanel.Visibility = isGpuMode ? Visibility.Visible : Visibility.Collapsed;
+                
+                // 根据计算方式刷新推理工具列表
+                RefreshInferenceTools();
+            }
+            catch { }
+        }
 
-                if (isLlamaCpp)
+        /// <summary>
+        /// 判断当前是否为GPU计算模式
+        /// </summary>
+        private bool IsGpuComputeMode()
+        {
+            var selectedMode = ComputeModeCombo.SelectedItem as ComboBoxItem;
+            var modeTag = selectedMode?.Tag as string ?? "gpu";
+            return modeTag == "gpu";
+        }
+
+        /// <summary>
+        /// 根据当前计算方式刷新推理工具ComboBox
+        /// GPU模式: rwkv_lightning, benchmark, llama-cuda, llama-sycl, llama-vulkan
+        /// CPU模式: llama-cpu
+        /// </summary>
+        private void RefreshInferenceTools()
+        {
+            var isGpuMode = IsGpuComputeMode();
+            var previousTool = _currentToolName;
+            
+            // 抑制事件，防止递归
+            _suppressToolSelectionEvents = true;
+            try
+            {
+                InferenceToolCombo.Items.Clear();
+                
+                if (isGpuMode)
                 {
-                    // 切换到GGUF模型下载地址
-                    ModelScopeUrlText.Text = DefaultGgufModelScopeUrl;
-                    InferenceToolDescription.Text = toolName switch
-                    {
-                        "llama-cuda" => "💡 llama-server [CUDA] - NVIDIA GPU加速，需安装CUDA驱动",
-                        "llama-sycl" => "💡 llama-server [SYCL] - Intel GPU加速（Arc独显/Xe核显）",
-                        "llama-vulkan" => "💡 llama-server [Vulkan] - AMD/通用GPU加速",
-                        "llama-cpu" => "💡 llama-server [CPU] - 纯CPU推理，无需GPU",
-                        _ => "💡 llama-server.exe 使用GGUF格式模型，提供OpenAI兼容API"
-                    };
-                    LogMessage($"🔧 已切换到 {toolName} 推理工具，下载地址已自动切换为GGUF模型仓库");
+                    // GPU模式：显示所有GPU推理工具
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "rwkv_lightning.exe (NVIDIA GPU - 完整翻译API服务)", Tag = "rwkv_lightning" });
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "benchmark.exe (NVIDIA GPU - 性能测试)", Tag = "benchmark" });
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "llama-server.exe [CUDA] (GGUF模型 - NVIDIA GPU)", Tag = "llama-cuda" });
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "llama-server.exe [SYCL] (GGUF模型 - Intel GPU)", Tag = "llama-sycl" });
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "llama-server.exe [Vulkan] (GGUF模型 - AMD/通用GPU)", Tag = "llama-vulkan" });
                 }
                 else
                 {
-                    // 切换到SafeTensors模型下载地址
-                    ModelScopeUrlText.Text = DefaultStModelScopeUrl;
-                    if (toolName == "benchmark")
-                    {
-                        InferenceToolDescription.Text = "💡 benchmark.exe 仅用于性能测试，不提供翻译API服务";
-                    }
-                    else
-                    {
-                        InferenceToolDescription.Text = "💡 rwkv_lightning.exe 提供完整的翻译API服务，使用safetensors格式模型";
-                    }
-                    LogMessage($"🔧 已切换到 {toolName} 推理工具，下载地址已自动切换为SafeTensors模型仓库");
+                    // CPU模式：仅显示CPU推理工具
+                    InferenceToolCombo.Items.Add(new ComboBoxItem { Content = "llama-server.exe [CPU] (GGUF模型 - 纯CPU推理)", Tag = "llama-cpu" });
                 }
+                
+                // 尝试恢复之前选择的工具，否则选第一项
+                int targetIndex = 0;
+                for (int i = 0; i < InferenceToolCombo.Items.Count; i++)
+                {
+                    var item = InferenceToolCombo.Items[i] as ComboBoxItem;
+                    if ((item?.Tag as string) == previousTool)
+                    {
+                        targetIndex = i;
+                        break;
+                    }
+                }
+                InferenceToolCombo.SelectedIndex = targetIndex;
+                
+                // 手动更新当前工具名和描述
+                var selectedItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
+                var newToolName = selectedItem?.Tag as string ?? "rwkv_lightning";
+                var toolChanged = newToolName != previousTool;
+                _currentToolName = newToolName;
+                UpdateInferenceToolDescription();
+                
+                // 恢复标志后，如果工具发生了变化，需要刷新模型列表
+                if (toolChanged)
+                {
+                    _suppressToolSelectionEvents = false;
+                    _ = InitializeGpuAndModelsAsync();
+                    return; // 已恢复标志，直接返回
+                }
+            }
+            finally
+            {
+                _suppressToolSelectionEvents = false;
+            }
+        }
+
+        /// <summary>
+        /// 推理工具选择变化处理
+        /// </summary>
+        private void InferenceToolCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // 防止递归调用或服务未初始化
+            if (_suppressToolSelectionEvents || _gpuResourceService == null) return;
+            
+            try
+            {
+                var selectedToolItem = InferenceToolCombo.SelectedItem as ComboBoxItem;
+                // 优先使用Tag获取工具名，回退到Content解析
+                var toolName = selectedToolItem?.Tag as string ?? ResolveToolName(selectedToolItem?.Content as string ?? "");
+                _currentToolName = toolName;
+                
+                UpdateInferenceToolDescription();
 
                 // 切换推理工具后刷新本地模型列表（不同工具对应不同格式的模型）
                 _ = InitializeGpuAndModelsAsync();
             }
             catch { }
+        }
+
+        /// <summary>
+        /// 根据当前工具名更新描述文本和下载地址
+        /// </summary>
+        private void UpdateInferenceToolDescription()
+        {
+            var toolName = _currentToolName;
+            var isLlamaCpp = toolName is "llama-cuda" or "llama-sycl" or "llama-vulkan" or "llama-cpu";
+
+            if (isLlamaCpp)
+            {
+                ModelScopeUrlText.Text = DefaultGgufModelScopeUrl;
+                InferenceToolDescription.Text = toolName switch
+                {
+                    "llama-cuda" => "💡 llama-server [CUDA] - NVIDIA GPU加速，需安装CUDA驱动",
+                    "llama-sycl" => "💡 llama-server [SYCL] - Intel GPU加速（Arc独显/Xe核显）",
+                    "llama-vulkan" => "💡 llama-server [Vulkan] - AMD/通用GPU加速",
+                    "llama-cpu" => "💡 llama-server [CPU] - 纯CPU推理，无需GPU",
+                    _ => "💡 llama-server.exe 使用GGUF格式模型，提供OpenAI兼容API"
+                };
+            }
+            else
+            {
+                ModelScopeUrlText.Text = DefaultStModelScopeUrl;
+                if (toolName == "benchmark")
+                {
+                    InferenceToolDescription.Text = "💡 benchmark.exe 仅用于性能测试，不提供翻译API服务";
+                }
+                else
+                {
+                    InferenceToolDescription.Text = "💡 rwkv_lightning.exe 提供完整的翻译API服务（NVIDIA GPU专属），使用safetensors格式模型";
+                }
+            }
         }
 
         private void OpenTranslationRulesEditor(object sender, RoutedEventArgs e)

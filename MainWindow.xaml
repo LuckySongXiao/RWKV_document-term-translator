@@ -124,11 +124,20 @@
                                 <TextBlock x:Name="LocalServiceStatusText" Text="⏹️ 已停止" VerticalAlignment="Center" Foreground="#666666"/>
                             </StackPanel>
 
-                            <!-- GPU选择 -->
-                            <TextBlock Text="🖥️ 选择GPU" FontWeight="Bold" Margin="0,8,0,3"/>
-                            <ComboBox x:Name="GpuSelectorCombo" Height="25" Margin="0,2">
-                                <ComboBoxItem Content="正在检测GPU..."/>
+                            <!-- 计算方式选择 -->
+                            <TextBlock Text="🖥️ 选择计算方式" FontWeight="Bold" Margin="0,8,0,3"/>
+                            <ComboBox x:Name="ComputeModeCombo" Height="25" Margin="0,2" SelectedIndex="0" SelectionChanged="ComputeModeCombo_SelectionChanged">
+                                <ComboBoxItem Content="GPU (图形处理器)" Tag="gpu"/>
+                                <ComboBoxItem Content="CPU (中央处理器)" Tag="cpu"/>
                             </ComboBox>
+
+                            <!-- GPU选择（仅GPU模式显示） -->
+                            <StackPanel x:Name="GpuSelectPanel">
+                                <TextBlock Text="🖥️ 选择GPU" FontWeight="Bold" Margin="0,8,0,3"/>
+                                <ComboBox x:Name="GpuSelectorCombo" Height="25" Margin="0,2">
+                                    <ComboBoxItem Content="正在检测GPU..."/>
+                                </ComboBox>
+                            </StackPanel>
 
                             <!-- 模型选择 -->
                             <TextBlock Text="📦 选择模型" FontWeight="Bold" Margin="0,8,0,3"/>
@@ -139,14 +148,8 @@
                             <!-- 推理工具选择 -->
                             <TextBlock Text="🔧 推理工具" FontWeight="Bold" Margin="0,8,0,3"/>
                             <ComboBox x:Name="InferenceToolCombo" Height="25" Margin="0,2" SelectedIndex="0" SelectionChanged="InferenceToolCombo_SelectionChanged">
-                                <ComboBoxItem Content="rwkv_lightning.exe (推荐 - 完整翻译API服务)"/>
-                                <ComboBoxItem Content="benchmark.exe (性能测试 - 不提供翻译API)"/>
-                                <ComboBoxItem Content="llama-server.exe [CUDA] (GGUF模型 - NVIDIA GPU)"/>
-                                <ComboBoxItem Content="llama-server.exe [SYCL] (GGUF模型 - Intel GPU)"/>
-                                <ComboBoxItem Content="llama-server.exe [Vulkan] (GGUF模型 - AMD/通用GPU)"/>
-                                <ComboBoxItem Content="llama-server.exe [CPU] (GGUF模型 - 纯CPU推理)"/>
                             </ComboBox>
-                            <TextBlock x:Name="InferenceToolDescription" Text="💡 rwkv_lightning.exe 提供完整的翻译API服务；llama-server.exe 使用GGUF格式模型" FontSize="10" Foreground="Gray" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="InferenceToolDescription" Text="" FontSize="10" Foreground="Gray" Margin="0,4,0,0" TextWrapping="Wrap"/>
 
                             <!-- ModelScope下载地址 -->
                             <TextBlock Text="🌐 ModelScope下载地址" FontWeight="Bold" Margin="0,8,0,3"/>

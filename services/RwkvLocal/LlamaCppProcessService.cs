@@ -29,6 +29,7 @@ namespace DocumentTranslator.Services.RwkvLocal
         private readonly ILogger _logger;
         private readonly ModelManagementService _modelService;
         private readonly GpuResourceService _gpuService;
+        private readonly ConcurrencyCalculator _concurrencyCalculator;
         
         private Process? _process;
         private readonly HttpClient _httpClient;
@@ -43,11 +44,13 @@ namespace DocumentTranslator.Services.RwkvLocal
         public LlamaCppProcessService(
             ILogger logger,
             ModelManagementService modelService,
-            GpuResourceService gpuService)
+            GpuResourceService gpuService,
+            ConcurrencyCalculator concurrencyCalculator)
         {
             _logger = logger;
             _modelService = modelService;
             _gpuService = gpuService;
+            _concurrencyCalculator = concurrencyCalculator;
             
             Status = new RwkvServiceStatus();
             _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
@@ -62,7 +65,9 @@ namespace DocumentTranslator.Services.RwkvLocal
         /// <param name="toolName">工具名称（llama-cuda, llama-cpu, llama-vulkan）</param>
         /// <param name="preferredPort">首选端口</param>
         /// <param name="chatTemplate">对话模板名称（如 rwkv-world、chatml、llama3），默认 rwkv-world</param>
-        public async Task<bool> StartAsync(ModelInfo model, GpuInfo? gpu, string toolName = "llama-cuda", int? preferredPort = null, string chatTemplate = null)
+        /// <param name="enableBszTest">是否启用BSZ并发上限测试</param>
+        /// <param name="bszIncrement">BSZ测试每次递增的并发数</param>
+        public async Task<bool> StartAsync(ModelInfo model, GpuInfo? gpu, string toolName = "llama-cuda", int? preferredPort = null, string chatTemplate = null, bool enableBszTest = false, int bszIncrement = 10)
         {
             if (Status.State == ServiceState.Running || Status.State == ServiceState.Starting)
             {
@@ -189,7 +194,26 @@ namespace DocumentTranslator.Services.RwkvLocal
                 {
                     if (!string.IsNullOrEmpty(e.Data))
                     {
-                        _logger.LogWarning("[llama-server-ERR] {Data}", e.Data);
+                        // llama-server 将大量调试信息输出到 stderr
+                        // 仅将包含错误关键词的输出以 Warning 级别记录，其余以 Debug 级别记录
+                        var data = e.Data;
+                        var isError = data.Contains("error", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("fail", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("assert", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("abort", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("CUDA", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("out of memory", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("fatal", StringComparison.OrdinalIgnoreCase)
+                                   || data.Contains("exception", StringComparison.OrdinalIgnoreCase);
+                        
+                        if (isError)
+                        {
+                            _logger.LogWarning("[llama-server-ERR] {Data}", data);
+                        }
+                        else
+                        {
+                            _logger.LogDebug("[llama-server] {Data}", data);
+                        }
                     }
                 };
 
@@ -218,13 +242,25 @@ namespace DocumentTranslator.Services.RwkvLocal
                 {
                     UpdateStatus(ServiceState.Running);
                     
-                    // 设置默认并发数
-                    Status.MaxConcurrency = 4;
-                    
                     // 启动监控任务
                     _monitorTask = MonitorServiceAsync(_monitorCts.Token);
                     
-                    _logger.LogInformation("llama-server 启动成功，端口: {Port}", Status.Port);
+                    // 服务启动后进行并发测试
+                    if (enableBszTest)
+                    {
+                        var apiUrl = $"http://127.0.0.1:{Status.Port}/v1/completions";
+                        Status.MaxConcurrency = await _concurrencyCalculator.CalculateMaxConcurrencyAsync(
+                            gpu, model, apiUrl, enableBszTest, bszIncrement, engineType: toolName);
+                        
+                        _logger.LogInformation($"llama-server 启动成功，端口: {Status.Port}, BSZ测试并发数: {Status.MaxConcurrency} (工具: {toolName})");
+                    }
+                    else
+                    {
+                        // 设置默认并发数
+                        Status.MaxConcurrency = 4;
+                        _logger.LogInformation("llama-server 启动成功，端口: {Port}", Status.Port);
+                    }
+                    
                     return true;
                 }
                 else
