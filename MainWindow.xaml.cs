@@ -311,7 +311,7 @@ namespace DocumentTranslator
                                 });
                             }
                             GpuSelectorCombo.SelectedIndex = 0;
-                            LogMessage($"🎮 检测到 {_availableGpus.Count} 个NVIDIA GPU");
+                            LogMessage($"🎮 检测到 {_availableGpus.Count} 个GPU: {string.Join(", ", _availableGpus.Select(g => g.Name))}");
                             
                             // 显示GPU显存信息
                             var firstGpu = _availableGpus[0];
@@ -319,9 +319,9 @@ namespace DocumentTranslator
                         }
                         else
                         {
-                            GpuSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未检测到NVIDIA GPU" });
+                            GpuSelectorCombo.Items.Add(new ComboBoxItem { Content = "⚠️ 未检测到GPU" });
                             GpuSelectorCombo.SelectedIndex = 0;
-                            LogMessage("⚠️ 未检测到NVIDIA GPU，已自动切换到CPU模式");
+                            LogMessage("⚠️ 未检测到GPU，已自动切换到CPU模式");
                             // 无GPU时自动切换到CPU模式
                             ComputeModeCombo.SelectedIndex = 1; // CPU
                         }

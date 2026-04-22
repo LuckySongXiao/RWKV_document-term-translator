@@ -466,8 +466,8 @@ namespace DocumentTranslator.Services.RwkvLocal
                 }
                 catch
                 {
-                    // 如果无法在模型磁盘创建，回退到系统临时目录
-                    tempDir = Path.Combine(Path.GetTempPath(), "llama_models");
+                    // 如果无法在模型磁盘创建，回退到安全临时目录
+                    tempDir = Path.Combine(GetSafeTempDirectory(), "llama_models");
                     Directory.CreateDirectory(tempDir);
                 }
 
@@ -518,7 +518,7 @@ namespace DocumentTranslator.Services.RwkvLocal
                     return originalDir;
                 }
 
-                var tempDir = Path.Combine(Path.GetTempPath(), "llama_work", prefix);
+                var tempDir = Path.Combine(GetSafeTempDirectory(), "llama_work", prefix);
                 
                 // 如果已存在，直接使用
                 if (Directory.Exists(tempDir))
@@ -549,6 +549,36 @@ namespace DocumentTranslator.Services.RwkvLocal
                 _logger.LogWarning(ex, "准备ASCII工作目录失败，使用原始路径");
                 return originalDir;
             }
+        }
+
+        /// <summary>
+        /// 获取安全的临时目录路径
+        /// 优先使用D盘根目录（避免C:\Users下的权限问题），回退到系统临时目录
+        /// </summary>
+        private static string GetSafeTempDirectory()
+        {
+            // 优先尝试D盘（办公电脑C盘可能有权限限制）
+            var candidates = new[] { "D:\\", "E:\\", "F:\\" };
+            foreach (var drive in candidates)
+            {
+                try
+                {
+                    if (Directory.Exists(drive))
+                    {
+                        var tempDir = Path.Combine(drive, "llama_tmp");
+                        Directory.CreateDirectory(tempDir);
+                        // 测试写入权限
+                        var testFile = Path.Combine(tempDir, ".write_test");
+                        File.WriteAllText(testFile, "test");
+                        File.Delete(testFile);
+                        return tempDir;
+                    }
+                }
+                catch { }
+            }
+            
+            // 回退到系统临时目录
+            return Path.GetTempPath();
         }
 
         /// <summary>

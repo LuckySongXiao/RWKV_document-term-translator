@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -163,7 +164,7 @@ namespace DocumentTranslator.Services.RwkvLocal
         private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
         /// <summary>
-        /// 获取所有NVIDIA GPU信息
+        /// 获取所有GPU信息（NVIDIA + Intel + AMD）
         /// </summary>
         [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         public async Task<List<GpuInfo>> GetAllGpusAsync()
@@ -172,13 +173,28 @@ namespace DocumentTranslator.Services.RwkvLocal
             {
                 var gpus = new List<GpuInfo>();
 
+                // NVIDIA GPU：优先使用NVML，回退到WMI
                 if (_nvmlInitialized)
                 {
                     gpus = GetGpusViaNvml();
                 }
                 else
                 {
-                    gpus = GetGpusViaWmi();
+                    gpus = GetGpusViaWmi("NVIDIA");
+                }
+
+                // Intel GPU（Arc独显 / Xe核显）
+                var intelGpus = GetGpusViaWmi("Intel");
+                gpus.AddRange(intelGpus);
+
+                // AMD GPU（Radeon独显 / 核显）
+                var amdGpus = GetGpusViaWmi("AMD");
+                gpus.AddRange(amdGpus);
+
+                // 重新编号
+                for (int i = 0; i < gpus.Count; i++)
+                {
+                    gpus[i].Index = i;
                 }
 
                 return gpus;
@@ -294,34 +310,32 @@ namespace DocumentTranslator.Services.RwkvLocal
 
         /// <summary>
         /// 通过WMI获取GPU信息（备用方案）
+        /// 支持NVIDIA、Intel、AMD三种品牌
         /// </summary>
         [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-        private List<GpuInfo> GetGpusViaWmi()
+        private List<GpuInfo> GetGpusViaWmi(string brand = "NVIDIA")
         {
             var gpus = new List<GpuInfo>();
 
             try
             {
-                // 使用System.Management查询GPU信息
-                // 注意：需要在项目中添加对System.Management的引用
                 var scope = new System.Management.ManagementScope(@"\\.\root\cimv2");
-                var query = new System.Management.ObjectQuery("SELECT * FROM Win32_VideoController WHERE Name LIKE '%NVIDIA%'");
+                var query = new System.Management.ObjectQuery($"SELECT * FROM Win32_VideoController WHERE Name LIKE '%{brand}%'");
                 using var searcher = new System.Management.ManagementObjectSearcher(scope, query);
 
-                int index = 0;
                 foreach (System.Management.ManagementObject obj in searcher.Get())
                 {
+                    var gpuName = obj["Name"]?.ToString() ?? $"Unknown {brand} GPU";
                     var gpu = new GpuInfo
                     {
-                        Index = index++,
-                        Name = obj["Name"]?.ToString() ?? "Unknown NVIDIA GPU"
+                        Name = gpuName
                     };
 
                     // 尝试获取显存大小（AdapterRAM单位是字节）- WMI 返回的是专属显存
                     if (obj["AdapterRAM"] != null)
                     {
                         gpu.DedicatedMemoryBytes = Convert.ToInt64(obj["AdapterRAM"]);
-                        gpu.TotalMemoryBytes = Convert.ToInt64(obj["AdapterRAM"]); // 保持兼容
+                        gpu.TotalMemoryBytes = Convert.ToInt64(obj["AdapterRAM"]);
                     }
 
                     // WMI无法获取实时显存使用情况
@@ -332,14 +346,27 @@ namespace DocumentTranslator.Services.RwkvLocal
 
                     gpu.DriverVersion = obj["DriverVersion"]?.ToString();
 
+                    // 根据品牌设置GPU类型标识
+                    if (brand == "Intel")
+                    {
+                        gpu.CudaComputeCapability = "SYCL"; // 标记为SYCL可用
+                    }
+                    else if (brand == "AMD")
+                    {
+                        gpu.CudaComputeCapability = "Vulkan"; // 标记为Vulkan可用
+                    }
+
                     gpus.Add(gpu);
                 }
 
-                _logger.LogInformation($"通过WMI检测到 {gpus.Count} 个NVIDIA GPU");
+                if (gpus.Count > 0)
+                {
+                    _logger.LogInformation($"通过WMI检测到 {gpus.Count} 个{brand} GPU: {string.Join(", ", gpus.Select(g => g.Name))}");
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "通过WMI获取GPU信息时发生异常");
+                _logger.LogError(ex, $"通过WMI获取{brand} GPU信息时发生异常");
             }
 
             return gpus;
