@@ -332,37 +332,33 @@ namespace DocumentTranslator.Services.RwkvLocal
                     };
 
                     // 尝试获取显存大小（AdapterRAM单位是字节）- WMI 返回的是专属显存
-                    var adapterRAM = obj["AdapterRAM"] != null ? Convert.ToInt64(obj["AdapterRAM"]) : 0;
+                    var adapterRAM = TryGetWmiInt64(obj, "AdapterRAM");
 
                     if (brand == "Intel")
                     {
                         gpu.CudaComputeCapability = "SYCL"; // 标记为SYCL可用
                         
-                        // Intel 核显使用共享系统内存，AdapterRAM 通常返回 0 或很小的值
-                        // 通过 Win32_VideoController 的 MaxRefreshRate/MinRefreshRate 无法获取
-                        // 使用 SharedSystemMemory 或估算值
-                        if (adapterRAM <= 0 || adapterRAM < 64 * 1024 * 1024) // 小于64MB视为无效
+                        // Intel 核显使用共享系统内存，AdapterRAM 只是 DVMT 预分配值（通常 128MB~1GB）
+                        // 真实可用显存 = 预分配 + 共享系统内存（动态分配，可达系统物理内存的一半）
+                        // 优先从 WMI 获取 SharedSystemMemory
+                        var sharedMem = TryGetWmiInt64(obj, "SharedSystemMemory");
+                        
+                        if (sharedMem > 0)
                         {
-                            // 尝试从 WMI 获取 SharedSystemMemory
-                            var sharedMem = obj["SharedSystemMemory"] != null ? Convert.ToInt64(obj["SharedSystemMemory"]) : 0;
-                            if (sharedMem > 0)
-                            {
-                                gpu.DedicatedMemoryBytes = sharedMem;
-                                gpu.TotalMemoryBytes = sharedMem;
-                            }
-                            else
-                            {
-                                // 回退：估算为系统可用内存的一半（核显动态分配）
-                                var estimatedMem = GetAvailableSystemMemoryBytes() / 2;
-                                gpu.DedicatedMemoryBytes = estimatedMem;
-                                gpu.TotalMemoryBytes = estimatedMem;
-                                _logger.LogInformation($"Intel 核显显存无法通过WMI获取，估算为系统可用内存的一半: {gpu.DedicatedMemoryGB:F1}GB");
-                            }
+                            // WMI 返回了 SharedSystemMemory，总显存 = AdapterRAM + SharedSystemMemory
+                            gpu.DedicatedMemoryBytes = adapterRAM > 0 ? adapterRAM : 0;
+                            gpu.TotalMemoryBytes = (adapterRAM > 0 ? adapterRAM : 0) + sharedMem;
+                            _logger.LogInformation($"Intel GPU 显存: 专用={gpu.DedicatedMemoryGB:F1}GB, 共享={sharedMem / 1024.0 / 1024.0 / 1024.0:F1}GB, 总计={gpu.TotalMemoryGB:F1}GB");
                         }
                         else
                         {
-                            gpu.DedicatedMemoryBytes = adapterRAM;
-                            gpu.TotalMemoryBytes = adapterRAM;
+                            // WMI 未返回 SharedSystemMemory，通过系统物理内存估算
+                            // Intel 核显共享显存通常为系统物理内存的 1/2（BIOS 中 DVMT Pre-Allocated 设置）
+                            var totalPhysicalMem = GetTotalPhysicalMemoryBytes();
+                            var estimatedSharedMem = totalPhysicalMem / 2;
+                            gpu.DedicatedMemoryBytes = adapterRAM > 0 ? adapterRAM : 0;
+                            gpu.TotalMemoryBytes = estimatedSharedMem;
+                            _logger.LogInformation($"Intel 核显显存估算: 专用={gpu.DedicatedMemoryGB:F1}GB, 共享(系统内存/2)={estimatedSharedMem / 1024.0 / 1024.0 / 1024.0:F1}GB");
                         }
                     }
                     else if (brand == "AMD")
@@ -435,22 +431,51 @@ namespace DocumentTranslator.Services.RwkvLocal
         }
 
         /// <summary>
-        /// 获取系统可用物理内存大小（字节）
+        /// 安全获取 WMI 属性的 Int64 值，属性不存在或转换失败返回 0
         /// </summary>
-        private static long GetAvailableSystemMemoryBytes()
+        private static long TryGetWmiInt64(System.Management.ManagementObject obj, string propertyName)
         {
             try
             {
-                using var memCounter = new System.Diagnostics.PerformanceCounter("Memory", "Available MBytes");
-                var availableMB = memCounter.NextValue();
-                return (long)(availableMB * 1024 * 1024);
+                var value = obj[propertyName];
+                if (value != null) return Convert.ToInt64(value);
             }
-            catch
+            catch { }
+            return 0;
+        }
+
+        /// <summary>
+        /// 获取系统物理内存总量（字节）
+        /// </summary>
+        private static long GetTotalPhysicalMemoryBytes()
+        {
+            try
             {
-                // 回退：使用 GC 获取的总内存作为估算
+                // 通过 WMI 获取物理内存总量
+                var scope = new System.Management.ManagementScope(@"\\.\root\cimv2");
+                var query = new System.Management.ObjectQuery("SELECT TotalVisibleMemorySize FROM Win32_OperatingSystem");
+                using var searcher = new System.Management.ManagementObjectSearcher(scope, query);
+                foreach (System.Management.ManagementObject obj in searcher.Get())
+                {
+                    if (obj["TotalVisibleMemorySize"] != null)
+                    {
+                        // TotalVisibleMemorySize 单位是 KB
+                        return Convert.ToInt64(obj["TotalVisibleMemorySize"]) * 1024;
+                    }
+                }
+            }
+            catch { }
+            
+            // 回退：使用 GC 获取的内存信息
+            try
+            {
                 var memInfo = GC.GetGCMemoryInfo();
                 return (long)memInfo.TotalAvailableMemoryBytes;
             }
+            catch { }
+            
+            // 最终回退：假设 16GB
+            return 16L * 1024 * 1024 * 1024;
         }
 
         public void Dispose()
