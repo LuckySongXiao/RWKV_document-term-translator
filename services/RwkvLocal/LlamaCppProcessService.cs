@@ -133,7 +133,7 @@ namespace DocumentTranslator.Services.RwkvLocal
                 // GPU卸载层数设置
                 if ((toolName == "llama-cuda" || toolName == "llama-sycl" || toolName == "llama-vulkan") && gpu != null)
                 {
-                    arguments += " -ngl all";  // 全部层放到GPU
+                    arguments += " -ngl 99";  // 尽可能多层放到GPU（99层足够覆盖所有模型）
                 }
                 else
                 {
@@ -173,10 +173,27 @@ namespace DocumentTranslator.Services.RwkvLocal
                     WorkingDirectory = safeWorkingDir
                 };
 
-                // 设置CUDA_VISIBLE_DEVICES环境变量
-                if (gpu != null && toolName == "llama-cuda")
+                // 设置GPU相关环境变量
+                if (gpu != null)
                 {
-                    startInfo.EnvironmentVariables["CUDA_VISIBLE_DEVICES"] = gpu.Index.ToString();
+                    if (toolName == "llama-cuda")
+                    {
+                        startInfo.EnvironmentVariables["CUDA_VISIBLE_DEVICES"] = gpu.Index.ToString();
+                    }
+                    else if (toolName == "llama-sycl")
+                    {
+                        // SYCL 需要设置 ONEAPI_DEVICE_SELECTOR 指定 Intel GPU
+                        // 格式: level_zero:gpu 或 opencl:gpu
+                        // 不设置时默认使用所有可用设备
+                        startInfo.EnvironmentVariables["ONEAPI_DEVICE_SELECTOR"] = "level_zero:gpu";
+                        // 确保 SYCL 后端能找到 Intel GPU 驱动
+                        _logger.LogInformation("已设置 SYCL 环境变量: ONEAPI_DEVICE_SELECTOR=level_zero:gpu");
+                    }
+                    else if (toolName == "llama-vulkan")
+                    {
+                        // Vulkan 需要设置可见设备
+                        startInfo.EnvironmentVariables["GGML_VK_VISIBLE_DEVICES"] = gpu.Index.ToString();
+                    }
                 }
 
                 // 创建并启动进程

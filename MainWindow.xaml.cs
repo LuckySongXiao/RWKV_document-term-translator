@@ -547,9 +547,39 @@ namespace DocumentTranslator
                     var selectedGpuItem = GpuSelectorCombo.SelectedItem as ComboBoxItem;
                     selectedGpu = selectedGpuItem?.Tag as GpuInfo;
                     
-                    if (selectedGpu == null && _availableGpus.Count > 0)
+                    // 根据推理工具自动选择匹配的GPU
+                    // llama-sycl 需要 Intel GPU，llama-vulkan 需要 AMD/通用 GPU，llama-cuda/rwkv_lightning 需要 NVIDIA GPU
+                    if (toolName == "llama-sycl")
                     {
-                        selectedGpu = _availableGpus[0];
+                        selectedGpu = _availableGpus.FirstOrDefault(g => g.Name.Contains("Intel", StringComparison.OrdinalIgnoreCase));
+                        if (selectedGpu == null)
+                        {
+                            LogMessage("❌ llama-sycl 需要 Intel GPU，但未检测到 Intel GPU");
+                            MessageBox.Show("llama-server [SYCL] 需要 Intel GPU（Arc独显或UHD/Xe核显），但未检测到。\n\n请确认已安装 Intel GPU 驱动和 oneAPI 运行时。", "GPU不匹配", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return;
+                        }
+                        LogMessage($"🔧 SYCL 自动选择 Intel GPU: {selectedGpu.Name}");
+                    }
+                    else if (toolName == "llama-vulkan")
+                    {
+                        // Vulkan 优先使用 AMD GPU，其次使用其他非 NVIDIA GPU
+                        selectedGpu = _availableGpus.FirstOrDefault(g => g.Name.Contains("AMD", StringComparison.OrdinalIgnoreCase) || g.Name.Contains("Radeon", StringComparison.OrdinalIgnoreCase));
+                        if (selectedGpu == null)
+                        {
+                            selectedGpu = _availableGpus.FirstOrDefault(g => !g.Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) && !g.Name.Contains("Intel", StringComparison.OrdinalIgnoreCase));
+                        }
+                        if (selectedGpu == null && _availableGpus.Count > 0)
+                        {
+                            selectedGpu = _availableGpus[0]; // Vulkan 通用后端，任何 GPU 都可以
+                        }
+                    }
+                    else // llama-cuda, rwkv_lightning, benchmark 等 NVIDIA 工具
+                    {
+                        selectedGpu = _availableGpus.FirstOrDefault(g => g.Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase));
+                        if (selectedGpu == null && _availableGpus.Count > 0)
+                        {
+                            selectedGpu = _availableGpus[0];
+                        }
                     }
                     
                     if (selectedGpu == null)

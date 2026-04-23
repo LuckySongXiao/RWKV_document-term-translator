@@ -332,10 +332,49 @@ namespace DocumentTranslator.Services.RwkvLocal
                     };
 
                     // 尝试获取显存大小（AdapterRAM单位是字节）- WMI 返回的是专属显存
-                    if (obj["AdapterRAM"] != null)
+                    var adapterRAM = obj["AdapterRAM"] != null ? Convert.ToInt64(obj["AdapterRAM"]) : 0;
+
+                    if (brand == "Intel")
                     {
-                        gpu.DedicatedMemoryBytes = Convert.ToInt64(obj["AdapterRAM"]);
-                        gpu.TotalMemoryBytes = Convert.ToInt64(obj["AdapterRAM"]);
+                        gpu.CudaComputeCapability = "SYCL"; // 标记为SYCL可用
+                        
+                        // Intel 核显使用共享系统内存，AdapterRAM 通常返回 0 或很小的值
+                        // 通过 Win32_VideoController 的 MaxRefreshRate/MinRefreshRate 无法获取
+                        // 使用 SharedSystemMemory 或估算值
+                        if (adapterRAM <= 0 || adapterRAM < 64 * 1024 * 1024) // 小于64MB视为无效
+                        {
+                            // 尝试从 WMI 获取 SharedSystemMemory
+                            var sharedMem = obj["SharedSystemMemory"] != null ? Convert.ToInt64(obj["SharedSystemMemory"]) : 0;
+                            if (sharedMem > 0)
+                            {
+                                gpu.DedicatedMemoryBytes = sharedMem;
+                                gpu.TotalMemoryBytes = sharedMem;
+                            }
+                            else
+                            {
+                                // 回退：估算为系统可用内存的一半（核显动态分配）
+                                var estimatedMem = GetAvailableSystemMemoryBytes() / 2;
+                                gpu.DedicatedMemoryBytes = estimatedMem;
+                                gpu.TotalMemoryBytes = estimatedMem;
+                                _logger.LogInformation($"Intel 核显显存无法通过WMI获取，估算为系统可用内存的一半: {gpu.DedicatedMemoryGB:F1}GB");
+                            }
+                        }
+                        else
+                        {
+                            gpu.DedicatedMemoryBytes = adapterRAM;
+                            gpu.TotalMemoryBytes = adapterRAM;
+                        }
+                    }
+                    else if (brand == "AMD")
+                    {
+                        gpu.CudaComputeCapability = "Vulkan"; // 标记为Vulkan可用
+                        gpu.DedicatedMemoryBytes = adapterRAM > 0 ? adapterRAM : 0;
+                        gpu.TotalMemoryBytes = adapterRAM > 0 ? adapterRAM : 0;
+                    }
+                    else // NVIDIA
+                    {
+                        gpu.DedicatedMemoryBytes = adapterRAM;
+                        gpu.TotalMemoryBytes = adapterRAM;
                     }
 
                     // WMI无法获取实时显存使用情况
@@ -345,16 +384,6 @@ namespace DocumentTranslator.Services.RwkvLocal
                     gpu.GpuUtilization = 0;
 
                     gpu.DriverVersion = obj["DriverVersion"]?.ToString();
-
-                    // 根据品牌设置GPU类型标识
-                    if (brand == "Intel")
-                    {
-                        gpu.CudaComputeCapability = "SYCL"; // 标记为SYCL可用
-                    }
-                    else if (brand == "AMD")
-                    {
-                        gpu.CudaComputeCapability = "Vulkan"; // 标记为Vulkan可用
-                    }
 
                     gpus.Add(gpu);
                 }
@@ -403,6 +432,25 @@ namespace DocumentTranslator.Services.RwkvLocal
         {
             var gpus = await GetAllGpusAsync();
             return gpus.Count > 0 ? gpus[0] : null;
+        }
+
+        /// <summary>
+        /// 获取系统可用物理内存大小（字节）
+        /// </summary>
+        private static long GetAvailableSystemMemoryBytes()
+        {
+            try
+            {
+                using var memCounter = new System.Diagnostics.PerformanceCounter("Memory", "Available MBytes");
+                var availableMB = memCounter.NextValue();
+                return (long)(availableMB * 1024 * 1024);
+            }
+            catch
+            {
+                // 回退：使用 GC 获取的总内存作为估算
+                var memInfo = GC.GetGCMemoryInfo();
+                return (long)memInfo.TotalAvailableMemoryBytes;
+            }
         }
 
         public void Dispose()
