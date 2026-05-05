@@ -83,8 +83,8 @@ dotnet --version
 - HuggingFace: https://huggingface.co/Alic-Li
 
 **模型下载地址**:
-- **rwkv_lightning推理引擎** (SafeTensors): https://www.modelscope.cn/models/shoumenchougou/RWKV-7-World-ST/files
-- **llama_cpp推理引擎** (GGUF): https://www.modelscope.cn/models/shoumenchougou/RWKV7-G1e-1.5B-GGUF/files
+- **rwkv_lightning推理引擎** (SafeTensors): https://www.modelscope.cn/models/AlicLi/RWKV_v7_G1_Translate/files   
+- **llama_cpp推理引擎** (GGUF): https://www.modelscope.cn/models/AlicLi/RWKV_v7_G1_Translate/files 
 
 ### 3. 配置API
 ```bash
